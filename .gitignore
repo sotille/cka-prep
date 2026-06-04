@@ -1,0 +1,29 @@
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Editors
+.vscode/
+.idea/
+
+# Kube
+kubeconfig
+*.kubeconfig
+admin.conf
+
+# Secrets (defensive — should never commit anyway)
+*.key
+*.pem
+*-secret.yaml
+.env
+.env.*
+
+# Local scratch
+scratch/
+tmp/
+.tmp/
+
+# Killer.sh / proprietary
+killer-*.tar.gz
