@@ -1,5 +1,7 @@
 # Week 7 (Jul 20–26) — Storage
 
+> 📚 **Deep module:** [masterclass](../course/week-07-storage/masterclass.md) · [exercises](../course/week-07-storage/exercises.md)
+
 **Goal:** Volumes, PVs, PVCs, StorageClasses, Reclaim Policy.
 
 **Time budget:** 14h

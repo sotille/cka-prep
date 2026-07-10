@@ -1,5 +1,7 @@
 # Week 2 (Jun 15–21) — Workloads + Configuration
 
+> 📚 **Deep module:** [masterclass](../course/week-02-workloads-config/masterclass.md) · [exercises](../course/week-02-workloads-config/exercises.md)
+
 **Goal:** Master ConfigMaps, Secrets, environment variables, resource limits.
 
 **Time budget:** 17h

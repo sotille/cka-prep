@@ -1,0 +1,92 @@
+{
+  "task": "Build a complete, deep CKA preparation course in cka-prep based on the existing 10-week plan: deep-dive masterclasses, hands-on exercises with solutions, exam-style scenarios, break-and-fix labs, mock exams, and an exam-strategy masterclass. Aligned to the post-Feb-2025 CKA curriculum (Troubleshooting 30%, Cluster Architecture 25%, Services & Networking 20%, Workloads & Scheduling 15%, Storage 10%).",
+  "stories": [
+    {
+      "id": "US-001",
+      "title": "Exam-strategy masterclass + curriculum alignment",
+      "passes": false,
+      "acceptanceCriteria": [
+        "course/00-exam-masterclass.md exists and covers: current CKA domain weights (Troubleshooting 30%, Cluster Architecture/Installation/Configuration 25%, Services & Networking 20%, Workloads & Scheduling 15%, Storage 10%), exam environment (PSI remote desktop, allowed kubernetes.io docs, killer.sh bundled), time-management/triage strategy, terminal setup, question patterns, and exam-day checklist",
+        "Explicitly corrects the repo's stale assumption that Networking is 30% of the exam (old curriculum) and flags Troubleshooting as the real 30% domain",
+        "Maps post-2025 curriculum additions (Helm, Kustomize, Gateway API, CRDs/operators, dynamic provisioning, CNI install awareness) onto the existing 10-week plan so nothing is missed"
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Deep modules weeks 1-4 (architecture, workloads+config, scheduling, lifecycle/observability)",
+      "passes": false,
+      "acceptanceCriteria": [
+        "course/week-01-architecture/, course/week-02-workloads-config/, course/week-03-scheduling/, course/week-04-lifecycle-observability/ each contain masterclass.md and exercises.md",
+        "Each masterclass.md is a deep-dive (internals, failure modes, gotchas, speed techniques) covering every topic listed in the corresponding notes/week-NN file, at senior-engineer depth (not tutorial-level)",
+        "Week 2 module additionally covers Helm and Kustomize (2025 curriculum additions)",
+        "Each exercises.md has at least 12 exam-style tasks with time targets and complete worked solutions (commands + YAML)",
+        "All fenced YAML blocks in these files parse as valid YAML"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Deep modules weeks 5-8 (cluster maintenance, security/RBAC, storage, networking)",
+      "passes": false,
+      "acceptanceCriteria": [
+        "course/week-05-cluster-maintenance/, course/week-06-security-rbac/, course/week-07-storage/, course/week-08-networking/ each contain masterclass.md and exercises.md",
+        "Week 5 covers kubeadm install/upgrade flow and etcd backup/restore with exact commands and flags",
+        "Week 8 additionally covers Gateway API (2025 curriculum addition) alongside Services, Ingress, NetworkPolicy, CoreDNS, CNI",
+        "Each exercises.md has at least 12 exam-style tasks with time targets and complete worked solutions",
+        "All fenced YAML blocks in these files parse as valid YAML"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "Troubleshooting masterclass (30% domain) + break-and-fix labs",
+      "passes": false,
+      "acceptanceCriteria": [
+        "course/week-09-troubleshooting/masterclass.md exists with systematic diagnosis playbooks for: crashing pods, unschedulable pods, node NotReady, control-plane component failures, service/DNS failures, and kubeconfig/auth failures",
+        "course/week-09-troubleshooting/exercises.md has at least 12 troubleshooting scenarios with worked solutions",
+        "labs/breakfix/ contains at least 6 executable break-NN-*.sh scripts that each intentionally break a kind lab cluster in a different way, plus labs/breakfix/SOLUTIONS.md documenting diagnosis and fix for each",
+        "Break scripts pass bash -n syntax check"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Three full mock exams with solutions and grading",
+      "passes": false,
+      "acceptanceCriteria": [
+        "mock-exams/mock-exam-1.md, mock-exam-2.md, mock-exam-3.md each contain 15-17 tasks with per-task weights that approximate current domain weights, context/cluster framing per task, and a 2-hour time budget",
+        "Each mock exam has a matching mock-exam-N-solutions.md with full worked solutions and a self-grading rubric including the 66% pass threshold",
+        "Mock 3 is harder than 1 and 2 (killer.sh-style difficulty), stated in its header",
+        "All fenced YAML blocks in these files parse as valid YAML"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Weeks 9-10 exam-week program + daily speed drills",
+      "passes": false,
+      "acceptanceCriteria": [
+        "course/week-10-final-prep/masterclass.md exists with: killer.sh session/debrief protocol, weak-area triage method, spaced-repetition plan for the final two weeks, and exam-day logistics checklist",
+        "drills/speed-drills.md exists with timed daily drill circuits (task + time target) covering every exam domain",
+        "Content acknowledges the user's actual timeline (exam Aug 17, 2026, currently week 5) with a catch-up note"
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "Technical verification pass over all generated content",
+      "passes": false,
+      "acceptanceCriteria": [
+        "scripts/validate-course.sh exists and syntax-validates every fenced yaml block in course/, mock-exams/, and notes/, and bash -n checks all lab scripts; running it exits 0",
+        "Adversarial technical review of every module completed (facts, apiVersions, flags, commands) with all confirmed defects fixed",
+        "Curriculum-completeness check confirms every competency in the current CKA curriculum is covered by at least one module, with a coverage map recorded in course/00-exam-masterclass.md or a coverage section"
+      ]
+    },
+    {
+      "id": "US-008",
+      "title": "Repo integration and final review",
+      "passes": false,
+      "acceptanceCriteria": [
+        "README.md updated with a course index table linking every module, mock exam, and lab, without breaking existing sections",
+        "Each notes/week-NN file gains a link to its corresponding deep module (notes stay as personal-log skeletons)",
+        ".omc/progress.txt records what was built and learnings",
+        "Reviewer verification (architect) passed against these acceptance criteria"
+      ]
+    }
+  ]
+}

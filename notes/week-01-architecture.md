@@ -1,5 +1,7 @@
 # Week 1 (Jun 8–14) — Core Concepts + Architecture
 
+> 📚 **Deep module:** [masterclass](../course/week-01-architecture/masterclass.md) · [exercises](../course/week-01-architecture/exercises.md)
+
 **Goal:** Be fluent in kubectl basics. Understand control plane components.
 
 **Time budget:** 15h

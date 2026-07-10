@@ -1,5 +1,7 @@
 # Week 4 (Jun 29–Jul 5) — Logging, Monitoring, Lifecycle
 
+> 📚 **Deep module:** [masterclass](../course/week-04-lifecycle-observability/masterclass.md) · [exercises](../course/week-04-lifecycle-observability/exercises.md)
+
 **Goal:** Probes, rollout strategies, debugging methodology.
 
 **Time budget:** 15h

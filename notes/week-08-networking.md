@@ -1,5 +1,7 @@
 # Week 8 (Jul 27–Aug 2) — Networking ⭐ 30% OF EXAM
 
+> 📚 **Deep module:** [masterclass](../course/week-08-networking/masterclass.md) · [exercises](../course/week-08-networking/exercises.md)
+
 **Goal:** Services, Ingress, NetworkPolicies, CoreDNS, CNI.
 
 **Time budget:** 20h (heavy week)

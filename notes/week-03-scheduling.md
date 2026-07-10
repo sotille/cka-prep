@@ -1,5 +1,7 @@
 # Week 3 (Jun 22–28) — Scheduling
 
+> 📚 **Deep module:** [masterclass](../course/week-03-scheduling/masterclass.md) · [exercises](../course/week-03-scheduling/exercises.md)
+
 **Goal:** Master NodeSelector, Affinity, Taints/Tolerations, Static Pods.
 
 **Time budget:** 18h

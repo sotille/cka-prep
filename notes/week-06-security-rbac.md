@@ -1,5 +1,7 @@
 # Week 6 (Jul 13–19) — Security + RBAC
 
+> 📚 **Deep module:** [masterclass](../course/week-06-security-rbac/masterclass.md) · [exercises](../course/week-06-security-rbac/exercises.md)
+
 **Goal:** RBAC, ServiceAccounts, TLS certificates, kubeconfig.
 
 **Time budget:** 16h

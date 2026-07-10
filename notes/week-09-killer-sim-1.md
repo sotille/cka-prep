@@ -1,5 +1,7 @@
 # Week 9 (Aug 3–9) — Killer.sh Simulator #1
 
+> 📚 **Deep module:** [masterclass](../course/week-09-troubleshooting/masterclass.md) · [exercises](../course/week-09-troubleshooting/exercises.md) · [break-fix labs](../labs/breakfix/SOLUTIONS.md)
+
 **Goal:** Identify weak areas with a full mock exam.
 
 **Time budget:** 18h

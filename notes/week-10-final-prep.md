@@ -1,5 +1,7 @@
 # Week 10 (Aug 10–16) — Killer.sh #2 + Polish
 
+> 📚 **Deep module:** [masterclass](../course/week-10-final-prep/masterclass.md) · [speed drills](../drills/speed-drills.md)
+
 **Goal:** Speed, confidence, exam-day readiness.
 
 **Time budget:** 15h (taper to recover)

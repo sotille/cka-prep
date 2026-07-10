@@ -1,0 +1,9 @@
+# Ralph progress log — CKA deep course build
+
+## Iteration 1 (2026-07-08)
+- Read repo: 10-week plan in README, skeleton notes per week (~40-90 lines), cheatsheet, kind lab, drills template.
+- Key finding: repo assumes OLD CKA curriculum (week-08 labeled "Networking 30%"). Post-Feb-2025 curriculum: Troubleshooting 30%, Cluster Architecture 25%, Services & Networking 20%, Workloads & Scheduling 15%, Storage 10%. New topics: Helm, Kustomize, Gateway API, CRDs/operators, dynamic provisioning.
+- User timeline: today 2026-07-08 = week 5 of plan; exam 2026-08-17.
+- PRD created with 8 stories: US-001 strategy masterclass, US-002/003 week modules 1-8, US-004 troubleshooting+breakfix, US-005 mock exams, US-006 final-prep+drills, US-007 verification, US-008 integration.
+- Decision: course content in English (public repo, exam in English); chat reporting in Portuguese.
+- Convention: course/week-NN-topic/{masterclass.md,exercises.md}; labs/breakfix/; mock-exams/; scripts/validate-course.sh.

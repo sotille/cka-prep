@@ -1,5 +1,7 @@
 # Week 5 (Jul 6–12) — Cluster Maintenance ⭐ HIGH VALUE
 
+> 📚 **Deep module:** [masterclass](../course/week-05-cluster-maintenance/masterclass.md) · [exercises](../course/week-05-cluster-maintenance/exercises.md)
+
 **Goal:** Master etcd backup/restore + cluster upgrade. **THIS WEEK PAYS THE EXAM.**
 
 **Time budget:** 20h (heavy week)
