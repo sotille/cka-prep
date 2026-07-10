@@ -4,6 +4,23 @@
 - Read repo: 10-week plan in README, skeleton notes per week (~40-90 lines), cheatsheet, kind lab, drills template.
 - Key finding: repo assumes OLD CKA curriculum (week-08 labeled "Networking 30%"). Post-Feb-2025 curriculum: Troubleshooting 30%, Cluster Architecture 25%, Services & Networking 20%, Workloads & Scheduling 15%, Storage 10%. New topics: Helm, Kustomize, Gateway API, CRDs/operators, dynamic provisioning.
 - User timeline: today 2026-07-08 = week 5 of plan; exam 2026-08-17.
-- PRD created with 8 stories: US-001 strategy masterclass, US-002/003 week modules 1-8, US-004 troubleshooting+breakfix, US-005 mock exams, US-006 final-prep+drills, US-007 verification, US-008 integration.
+- PRD created with 8 stories.
 - Decision: course content in English (public repo, exam in English); chat reporting in Portuguese.
 - Convention: course/week-NN-topic/{masterclass.md,exercises.md}; labs/breakfix/; mock-exams/; scripts/validate-course.sh.
+
+## Iterations 2-4 (2026-07-08 .. 2026-07-10)
+- Ran Workflow cka-course-build: 14 modules, each generate -> adversarial verify -> fix. Hit session limits 3x mid-run; resumed each time from cache (resumeFromRunId). Final run: 42 agents, 0 errors, all 14 modules "fixed" (defects found & repaired).
+- BUILT (all on disk, ~18,600 lines):
+  - course/00-exam-masterclass.md (388+ lines): domain weights + repo correction, PSI Bridge env, time triage, first-5-min setup, question-pattern taxonomy, docs navigation, curriculum coverage map (section 8), 6-week countdown + catch-up plan, checkpoint.
+  - course/week-01..10 masterclass.md + exercises.md (week-10 has masterclass + drills/speed-drills.md instead of exercises). Depth confirmed by spot-check (networking masterclass: ClusterIP DNAT internals, EndpointSlice pipeline, targetPort defaults, LB-pending-on-kind).
+  - labs/breakfix/: 8 break-NN-*.sh scripts + SOLUTIONS.md (413 lines).
+  - mock-exams/: 3 exams (paper + solutions + setup.sh each). Weights verified: all three sum to exactly 100%.
+- VALIDATION: scripts/validate-course.sh (ruby-based, no new deps) — 157 YAML blocks + 13 shell scripts all pass, exit 0.
+- Fixed coverage-map cross-ref: HPA row pointed to week-03 but HPA is covered in week-02 -> corrected.
+- INTEGRATION (US-008): README.md got a "📘 The Deep Course" section (module index table, break-fix list, mock-exam table, curriculum-correction callout) + updated Repository Structure; all 41 local README links resolve; every notes/week-NN links to its deep module; links verified non-broken.
+- PRD: US-001..US-006 marked passes:true. US-007 (independent completeness audit) in flight via general-purpose agent. US-008 pending architect review.
+
+## Learnings
+- validate-course.sh must force UTF-8 (Encoding.default_external) or ruby heredoc chokes on em-dashes/emoji in course files.
+- Inline ruby -e with pt-BR strings (em dash) breaks under US-ASCII; use ruby scripts/files or ASCII-only inline.
+- Workflow resume-from-cache is essential here: session limits interrupt ~14 agents per run; cached completions replay free.

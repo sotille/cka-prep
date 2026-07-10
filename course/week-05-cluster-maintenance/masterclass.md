@@ -170,7 +170,7 @@ kubectl uncordon w1
 
 ### What `kubeadm upgrade apply` actually does
 
-Preflight → pulls new control-plane images → **renews all certificates** (unless `--certificate-renewal=false`) → writes new static pod manifests one component at a time, waiting for each to come healthy, with automatic rollback from `/etc/kubernetes/tmp` backups on failure → upgrades CoreDNS and kube-proxy addons → updates the `kubeadm-config` and `kubelet-config` ConfigMaps. Note the implication: **a regularly upgraded cluster never hits cert expiry**, because every upgrade renews certs.
+Preflight → pulls new control-plane images → **renews all certificates** (unless `--certificate-renewal=false`) → **upgrades the stacked etcd static pod** (unless `--etcd-upgrade=false`) → writes new static pod manifests one component at a time, waiting for each to come healthy, with automatic rollback from `/etc/kubernetes/tmp` backups on failure → upgrades CoreDNS and kube-proxy addons → updates the `kubeadm-config` and `kubelet-config` ConfigMaps. Two implications worth internalizing: **a regularly upgraded cluster never hits cert expiry**, because every upgrade renews certs; and the interactive `y/N` confirmation can be skipped with `-y`/`--yes` (`kubeadm upgrade apply v1.33.2 -y`) when you want an unattended run.
 
 After `upgrade apply`, `kubectl get nodes` still shows the OLD version for that node — that column is the **kubelet** version, which you haven't touched yet. Don't panic; finish steps 4-6.
 
@@ -277,7 +277,9 @@ Restore is offline: it unpacks the snapshot into a **fresh data directory**, the
 ```bash
 # 1. Restore into a NEW directory (must not exist / must be empty)
 etcdutl snapshot restore /srv/backup/etcd.db --data-dir=/var/lib/etcd-restore
-# Legacy form, still accepted on many exam images:
+# Legacy etcdctl form — ONLY on etcd 3.5 and older exam images. etcd 3.6 removed
+# `snapshot restore`/`snapshot status` from etcdctl entirely (they exist only in
+# etcdutl now), so on the kind lab and any 3.6 cluster this exits 1 — use etcdutl:
 # ETCDCTL_API=3 etcdctl snapshot restore /srv/backup/etcd.db --data-dir=/var/lib/etcd-restore
 ```
 

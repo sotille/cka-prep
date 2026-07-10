@@ -1,8 +1,16 @@
-# Week 01 — Exercises: Architecture & Core Concepts
+# Week 01 — Exercises: Cluster Architecture & Core Concepts
 
-Lab setup: kind cluster `cka` running (`kind get clusters` shows `cka`; nodes `cka-control-plane`, `cka-worker`, `cka-worker2`), context `kind-cka` active, aliases loaded (`alias k=kubectl; export do="--dry-run=client -o yaml"; export now="--grace-period=0 --force"`). Tasks with pre-existing/broken state include a **Setup** fence — run it first, don't read it as part of the task. Time yourself for real: the target includes verification.
+Lab setup: kind cluster `cka` running (`kind get clusters` → `cka`; nodes `cka-control-plane`, `cka-worker`, `cka-worker2`), context `kind-cka` active, aliases loaded:
 
-Exam flavor, once for the whole file: where a task says `docker exec -it <node> bash`, the real exam equivalent is `ssh <node>` then `sudo -i`.
+```bash
+alias k=kubectl
+export do="--dry-run=client -o yaml"
+export now="--grace-period=0 --force"
+```
+
+Tasks that need pre-existing or broken state include a **Setup** fence — run it first, don't read it as part of the task. Time yourself honestly: the target includes verification, not just typing.
+
+Exam-flavor note (once for the whole file): where a task says `docker exec -it cka-control-plane bash`, the real exam equivalent is `ssh <control-plane-node>` then `sudo -i`. Everything else runs identically.
 
 ---
 
@@ -10,36 +18,36 @@ Exam flavor, once for the whole file: where a task says `docker exec -it <node> 
 
 Context: fresh cluster, namespace `default`.
 
-1. List all nodes with their internal IPs, OS image, and container runtime version in one command.
+1. List all nodes with their internal IPs, OS image, and container-runtime version in one command.
 2. Write the InternalIP of every node, space-separated, to `/tmp/node-ips.txt` using jsonpath.
 3. List all pods in `kube-system` sorted by creation time, oldest first.
-4. Print the name of the newest pod in `kube-system`.
+4. Print the name of the single newest pod in `kube-system`.
 
 ## Task 2 — dry-run scaffolding (warmup, 4 min)
 
 Context: namespace `default`.
 
-1. Create a pod `web-01`, image `nginx:1.27`, exposing container port 80, with label `tier=frontend` — pure CLI, no file.
-2. Generate (do not apply) a manifest for a Deployment `api` with image `httpd:2.4` and 3 replicas into `/tmp/api.yaml`, then apply it.
-3. Generate a manifest for a pod `once` running `busybox:1.36` with command `sh -c "date; sleep 5"` that must run to completion exactly once (no restarts), save to `/tmp/once.yaml`, apply, and confirm its final phase is `Succeeded`.
+1. Create a pod `web-01`, image `nginx:1.27`, exposing container port 80, label `tier=frontend` — pure CLI, no file.
+2. Generate (do **not** apply) a manifest for a Deployment `api`, image `httpd:2.4`, 3 replicas, into `/tmp/api.yaml`; then apply it.
+3. Generate a manifest for a pod `once` running `busybox:1.36` with command `sh -c "date; sleep 5"` that runs to completion exactly once (no restarts), save to `/tmp/once.yaml`, apply, and confirm its final phase is `Succeeded`.
 
-## Task 3 — namespace operations (warmup, 4 min)
+## Task 3 — namespace operations (warmup, 5 min)
 
 Context: nothing pre-exists.
 
 1. Create namespace `team-alpha`.
 2. Make `team-alpha` the default namespace for the current context; prove it with a config command.
-3. Run a pod `scratch` (image `busybox:1.36`, command `sleep 3600`) without any `-n` flag and confirm it landed in `team-alpha`.
-4. Write the list of all resource *types* that are NOT namespaced to `/tmp/cluster-scoped.txt`.
-5. Reset the context default namespace to `default` (leave the pod running for later tasks).
+3. Run a pod `scratch` (image `busybox:1.36`, command `sleep 3600`) with **no** `-n` flag and confirm it landed in `team-alpha`.
+4. Write the list of all resource **types** that are NOT namespaced to `/tmp/cluster-scoped.txt`.
+5. Reset the context's default namespace back to `default` (leave the pod running for later).
 
 ## Task 4 — jsonpath and custom-columns (exam, 6 min)
 
 Context: `kube-system` as shipped by kind.
 
-1. Write every unique container image running in namespace `kube-system` to `/tmp/ks-images.txt`, one per line, sorted, no duplicates.
-2. Using custom-columns, print two columns for all pods in `kube-system`: pod name and node it runs on, headers `POD` and `NODE`.
-3. Print the kubelet version of each node using jsonpath only.
+1. Write every **unique** container image running in `kube-system` to `/tmp/ks-images.txt`, one per line, sorted, deduplicated.
+2. Using custom-columns, print two columns for every pod in `kube-system`: pod name and node it runs on, headers `POD` and `NODE`.
+3. Print the kubelet version of each node using jsonpath only, one `name<TAB>version` per line.
 
 ## Task 5 — multi-container pod, shared volume (exam, 8 min)
 
@@ -50,13 +58,13 @@ Create a pod `web-logs` with two containers sharing an `emptyDir` volume named `
 - Container `writer`: image `busybox:1.36`, appends the current date to `/data/out.log` every 2 seconds.
 - Container `reader`: image `busybox:1.36`, runs `tail -F /data/out.log`.
 
-Verify with pod logs that `reader` is streaming the dates written by `writer`.
+Verify with `k logs` that `reader` is streaming the dates `writer` produces.
 
 ## Task 6 — init container (exam, 6 min)
 
 Context: namespace `default`.
 
-Create a pod `initialized-web`: an init container `render` (image `busybox:1.36`) writes the text `week01` to `/work/index.html` on a shared `emptyDir`; the main container `web` (image `nginx:1.27`) serves that file from `/usr/share/nginx/html`. Verify by exec'ing a `cat` of the served file from inside `web`.
+Create a pod `initialized-web`: an init container `render` (image `busybox:1.36`) writes the text `week01` to `/work/index.html` on a shared `emptyDir`; the main container `web` (image `nginx:1.27`) serves that file from `/usr/share/nginx/html`. Verify by exec'ing `cat /usr/share/nginx/html/index.html` inside `web`.
 
 ## Task 7 — native sidecar (exam, 8 min)
 
@@ -65,84 +73,50 @@ Context: namespace `default`.
 Create a pod `app-sidecar` where:
 
 - Main container `app` (image `busybox:1.36`) writes a timestamp to `/var/log/app/app.log` every 3 seconds.
-- A **sidecar** container `shipper` (image `busybox:1.36`) runs `tail -F /var/log/app/app.log` and must be implemented so it starts **before** the main container and keeps running for the pod's lifetime (use the native sidecar mechanism, not a plain second container).
+- A **sidecar** container `shipper` (image `busybox:1.36`) runs `tail -F /var/log/app/app.log`, must start **before** the main container, and must keep running for the pod's lifetime. Use the **native sidecar** mechanism, not a plain second container.
 
-Verify: `k get pod app-sidecar` shows `2/2` READY, and `k logs app-sidecar -c shipper` shows the timestamps.
+Verify: `k get pod app-sidecar` shows `2/2` READY and `k logs app-sidecar -c shipper` shows the timestamps.
 
-## Task 8 — deployment lifecycle under pressure (exam, 6 min)
-
-Context: namespace `default`. Do the whole task CLI-only; no YAML files.
-
-1. Create Deployment `release` image `nginx:1.26`, 2 replicas.
-2. Scale to 5 replicas.
-3. Update the image to `nginx:1.27` and record the change-cause annotation "bump to 1.27". Wait for the rollout to finish.
-4. Update the image to `nginx:1.99-does-not-exist`. Observe what the rollout does.
-5. Roll back to the last working version and prove (a) rollout is healthy, (b) the running image is `nginx:1.27`.
-
-## Task 9 — pod lifecycle forensics (exam, 8 min)
+## Task 8 — deployment scale, rollout, rollback (exam, 6 min)
 
 Context: namespace `default`.
 
-1. Create three pods, all running `sh -c "sleep 5; exit 1"` with image `busybox:1.36`, one per restartPolicy: `p-always` (Always), `p-onfailure` (OnFailure), `p-never` (Never).
-2. Before checking: write down your prediction of each pod's `status.phase` and STATUS column ~2 minutes from now.
-3. Verify with a `--field-selector` query which pods are in phase `Failed`, and with jsonpath print the restart count and last-state exit code of `p-always`.
-4. Explain (one sentence each) why the three differ.
+1. Create Deployment `frontend`, image `nginx:1.25`, 4 replicas.
+2. Scale it to 6.
+3. Roll out image `nginx:1.27`, annotate the change-cause `bump to 1.27`, and wait for the rollout to complete.
+4. Roll it back to the previous revision and confirm the running image is `nginx:1.25` again.
 
-## Task 10 — the selector immutability wall (hard, 10 min)
+## Task 9 — inspect the control plane on kind (exam, 7 min)
+
+Context: kind cluster; you have `docker` on the host.
+
+1. List the static-pod manifests the control-plane kubelet runs.
+2. Read the `--service-cluster-ip-range` flag value from the API-server manifest.
+3. Find the `--data-dir` etcd uses.
+4. List the control-plane component pods in `kube-system` and identify how you'd tell a mirror (static) pod from an ordinary one.
+
+Exam flavor: on real kubeadm nodes these files are directly under `/etc/kubernetes/manifests` after you `ssh` + `sudo -i`; no `docker exec` layer.
+
+## Task 10 — CRD and custom resource (exam, 7 min)
 
 Context: namespace `default`.
 
-**Setup:**
+Setup — install a CRD and one custom resource:
 
 ```bash
-k create deployment legacy-api --image=nginx:1.27 --replicas=2
-```
-
-Compliance requires every pod of `legacy-api` to carry the label `tier: backend`, and requires the Deployment's selector to match on **both** `app: legacy-api` and `tier: backend`.
-
-1. Try to do it with `k edit deployment legacy-api` (change selector + template labels). Record the exact error you hit.
-2. Achieve the required end state anyway, with the least disruption you can justify.
-3. Prove: `k get deploy legacy-api -o jsonpath='{.spec.selector.matchLabels}'` shows both labels, pods carry both labels, 2/2 available.
-
-## Task 11 — control-plane surgery on kind (hard, 12 min)
-
-Context: whole cluster. This simulates the exam's "cluster X does not schedule pods" scenario.
-
-1. Exec into the control-plane node and list the static pod manifests directory.
-2. Break the scheduler: move `kube-scheduler.yaml` out of the manifests directory (e.g. to `/root/`). Confirm from outside that the scheduler mirror pod is gone.
-3. Create a pod `victim` (image `nginx:1.27`). Describe the classic no-scheduler signature: what is the phase, and what do the events show?
-4. Without fixing the scheduler, get a pod `bypass` (image `nginx:1.27`) running on `cka-worker` anyway.
-5. Restore the scheduler, confirm the mirror pod returns, and confirm `victim` gets scheduled retroactively.
-
-## Task 12 — crictl on a worker node (exam, 6 min)
-
-Context: uses Deployment `api` from Task 2 (recreate it if gone: `k create deploy api --image=httpd:2.4 --replicas=3`).
-
-1. Find which node one of the `api` pods runs on.
-2. Exec into that node and, using only crictl (no kubectl): list the pod sandboxes, find the container belonging to that `api` pod, print its last 5 log lines, and list the `httpd` image with its tag.
-3. Bonus: on the same node, check kubelet health the way you would on the exam (service status + last log lines).
-
-## Task 13 — CRDs and custom resources (exam, 8 min)
-
-Context: an "operator's" CRD is installed by the setup below (no controller behind it — inspection is the point).
-
-**Setup:**
-
-```bash
-cat <<'EOF' | kubectl apply -f -
+cat <<'EOF' | k apply -f -
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backups.stable.example.com
+  name: widgets.demo.cka.io
 spec:
-  group: stable.example.com
+  group: demo.cka.io
   scope: Namespaced
   names:
-    plural: backups
-    singular: backup
-    kind: Backup
-    shortNames:
-      - bk
+    plural: widgets
+    singular: widget
+    kind: Widget
+    shortNames: ["wd"]
   versions:
     - name: v1
       served: true
@@ -154,46 +128,95 @@ spec:
             spec:
               type: object
               properties:
-                source:
+                size:
                   type: string
-                schedule:
-                  type: string
-                retainDays:
+                replicas:
                   type: integer
+EOF
+
+cat <<'EOF' | k apply -f -
+apiVersion: demo.cka.io/v1
+kind: Widget
+metadata:
+  name: blue-widget
+  namespace: default
+spec:
+  size: large
+  replicas: 3
 EOF
 ```
 
-1. Without reading the setup fence: discover what CRDs exist on the cluster, and for this one determine its group, scope, shortnames, and served version — using kubectl only.
-2. Use `k explain` to inspect the spec schema of the custom kind.
-3. Create a `Backup` named `nightly-etcd` in namespace `default` with `source: etcd`, `schedule: "0 2 * * *"`, `retainDays: 7`.
-4. List it three ways: by kind, by shortname, by fully-qualified plural.group. Then print just its `retainDays` with jsonpath.
-5. One-sentence answer in `/tmp/operator.txt`: why does creating this Backup object cause no actual backup to run?
+1. Confirm the CRD is installed and print its group, version, and scope.
+2. Confirm the new `Widget` type is served by the API and find its short name.
+3. List all `Widget` custom resources across all namespaces.
+4. Print the `spec.size` of `blue-widget` with jsonpath.
+5. Create a second `Widget` named `red-widget` with `size: small` and `replicas: 1` using `$do` scaffolding is not possible for CRs — write the manifest by hand and apply it.
 
-## Task 14 — kubeconfig contexts (exam, 5 min)
+## Task 11 — kubeconfig contexts (exam, 5 min)
 
-Context: single kind cluster, context `kind-cka`.
+Context: current context `kind-cka`.
 
-1. Create a new context `cka-alpha` that reuses the existing `kind-cka` cluster and user but defaults to namespace `team-alpha`.
-2. Switch to it, and prove with a single command that both the context and its namespace are active.
-3. From `cka-alpha`, list pods with no `-n` flag — you should see the `scratch` pod from Task 3.
-4. Print the API server URL of the current context using `k config view` flags (no grep).
-5. Switch back to `kind-cka`.
+1. Print the current context name and the clusters/users/contexts defined, using config subcommands only.
+2. Create a **new context** named `cka-alpha` that reuses the existing `kind-cka` cluster and `kind-cka` user but defaults to namespace `team-alpha`.
+3. Switch to `cka-alpha`, run `k get pods` (no `-n`), and confirm it queries `team-alpha`.
+4. Switch back to `kind-cka`.
 
-## Task 15 — delete a node and observe (hard, 10 min)
+## Task 12 — api-resources and explain superpowers (exam, 5 min)
 
-Context: whole cluster.
+Context: any namespace.
 
-**Setup:**
+1. Without opening the docs, find the exact apiVersion and short name of `NetworkPolicy` and of `HorizontalPodAutoscaler`.
+2. Find the full schema path of `tolerations` on a Pod using `explain --recursive`.
+3. Show the fields available under `deployment.spec.strategy.rollingUpdate`.
+4. Write the names of all resource types in the `apps` API group to `/tmp/apps-kinds.txt`.
+
+## Task 13 — HARD: a pod that will not schedule (hard, 8 min)
+
+Context: namespace `default`.
+
+Setup:
 
 ```bash
-k create deployment node-lab --image=nginx:1.27 --replicas=4
-k rollout status deployment/node-lab
+cat <<'EOF' | k apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stuck
+  namespace: default
+spec:
+  nodeSelector:
+    disktype: ssd
+  containers:
+    - name: app
+      image: nginx:1.27
+EOF
 ```
 
-1. Record which `node-lab` pods run on `cka-worker2`.
-2. Delete the Node object `cka-worker2` (the object, not the container). Watch what happens to those pods and where the Deployment's replacement pods land. Explain which controllers did what.
-3. Bring `cka-worker2` back into the cluster (hint: the kubelet self-registers; you control the node's "machine" with docker) and verify it becomes `Ready` and receives its DaemonSet pods (`kindnet`, `kube-proxy`) again.
-4. Cleanup: `k delete deploy node-lab api release legacy-api web-logs 2>/dev/null; k delete pod web-01 app-sidecar initialized-web p-always p-onfailure p-never victim bypass $now 2>/dev/null; k delete ns team-alpha`.
+The pod `stuck` stays `Pending`. Diagnose **why** using only `kubectl` (do not read the setup fence as the answer — arrive at it from cluster state), then make it schedule and reach `Running` **without editing or deleting the pod's `nodeSelector`** and without deleting the pod. State in one line what stage of the scheduling pipeline was blocking it.
+
+## Task 14 — HARD: pod adoption, reaping, and the selector-immutability trap (hard, 12 min)
+
+Context: namespace `default`.
+
+Setup:
+
+```bash
+k create deployment web --image=nginx:1.27 --replicas=2
+k run web-legacy --image=nginx:1.27 --labels="app=web"
+```
+
+1. Explain, with evidence from the cluster, whether the standalone pod `web-legacy` (labels `app=web`, no `ownerReferences`) is owned by — or at risk from — the `web` Deployment's ReplicaSet. Print the ReplicaSet's **actual** selector to justify your answer.
+2. Create a **bare** ReplicaSet `web-rs` (no Deployment) with `replicas: 1`, selector `matchLabels: {app: web}`, and template labels `app=web`. Observe what it does to `web-legacy` and explain — with `ownerReferences` as evidence — why this ReplicaSet endangers `web-legacy` when the Deployment's ReplicaSet never could.
+3. The team now wants `web-rs` to manage **only** pods labelled `app=web,track=stable`, to run 2 replicas, and to stop controlling `web-legacy`. Change `web-rs`'s selector accordingly. (You will hit the immutability trap — solve it correctly, and preserve the already-adopted `web-legacy`.) Confirm the reworked `web-rs` runs 2 `Running` pods carrying both labels and that `web-legacy` still exists and is no longer owned by any ReplicaSet.
+
+## Task 15 — HARD: break and restore the scheduler on kind (hard, 10 min)
+
+Context: kind cluster; `docker` on host. This task deliberately stops the scheduler, so do it when no one else needs the lab.
+
+1. On `cka-control-plane`, move `kube-scheduler.yaml` out of `/etc/kubernetes/manifests/` (to `/tmp`), then confirm the scheduler pod disappears from `kube-system`.
+2. Create a pod `orphan` (image `nginx:1.27`) in `default` and observe its status and its Events. Contrast the failure signature with Task 13's.
+3. Restore the manifest, confirm the scheduler comes back, and confirm `orphan` schedules and reaches `Running`.
+4. In one line: what is the tell that distinguishes "scheduler is down" from "no node fits this pod"?
 
 ---
 
@@ -202,38 +225,39 @@ k rollout status deployment/node-lab
 ## Solution 1 — kubectl recon
 
 ```bash
-# 1 — -o wide carries INTERNAL-IP, OS-IMAGE, CONTAINER-RUNTIME
+# 1. nodes with IP / OS / runtime
 k get nodes -o wide
 
-# 2
+# 2. InternalIPs to file (space-separated)
 k get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' > /tmp/node-ips.txt
 
-# 3
+# 3. kube-system pods, oldest first
 k get pods -n kube-system --sort-by=.metadata.creationTimestamp
 
-# 4 — newest = last line of the oldest-first sort
+# 4. newest pod name = last line of the sort, first column
 k get pods -n kube-system --sort-by=.metadata.creationTimestamp -o name | tail -1
 ```
 
-Why: `--sort-by` takes a jsonpath; combining it with `-o name | tail -1` answers "newest/oldest X" questions without reading timestamps.
+Why: `-o wide` adds INTERNAL-IP/OS-IMAGE/CONTAINER-RUNTIME columns; the `[?(@.type=="InternalIP")]` jsonpath filter picks the right address entry; `--sort-by` takes a jsonpath into each item, and sorts ascending, so `tail -1` is the newest.
 
 ## Solution 2 — dry-run scaffolding
 
 ```bash
-# 1
-k run web-01 --image=nginx:1.27 --port=80 --labels=tier=frontend
+# 1. pod, pure CLI
+k run web-01 --image=nginx:1.27 --port=80 --labels="tier=frontend"
 
-# 2
-k create deployment api --image=httpd:2.4 --replicas=3 $do > /tmp/api.yaml
+# 2. deployment manifest, then apply
+k create deploy api --image=httpd:2.4 --replicas=3 $do > /tmp/api.yaml
 k apply -f /tmp/api.yaml
 
-# 3 — --restart=Never is the load-bearing flag
-k run once --image=busybox:1.36 --restart=Never $do -- sh -c "date; sleep 5" > /tmp/once.yaml
+# 3. run-to-completion pod
+k run once --image=busybox:1.36 --restart=Never $do -- sh -c 'date; sleep 5' > /tmp/once.yaml
 k apply -f /tmp/once.yaml
-sleep 8 && k get pod once -o jsonpath='{.status.phase}{"\n"}'   # Succeeded
+k wait --for=jsonpath='{.status.phase}'=Succeeded pod/once --timeout=30s
+k get pod once   # STATUS Completed, phase Succeeded
 ```
 
-Generated `/tmp/once.yaml` (for reference):
+`/tmp/once.yaml` produced by the scaffold:
 
 ```yaml
 apiVersion: v1
@@ -257,67 +281,56 @@ spec:
 status: {}
 ```
 
-Why: with the default `restartPolicy: Always` the pod would restart after exit 0 forever (CrashLoopBackOff on success) and never reach `Succeeded`.
+Why: `--restart=Never` makes `kubectl run` create a bare Pod (not a Deployment) whose completion yields phase `Succeeded`; everything after `--` becomes the container args.
 
 ## Solution 3 — namespace operations
 
 ```bash
-# 1
+# 1. create
 k create namespace team-alpha
 
-# 2
+# 2. pin default ns for current context, then prove it
 k config set-context --current --namespace=team-alpha
-k config get-contexts        # NAMESPACE column shows team-alpha on the * row
+k config view --minify -o jsonpath='{..namespace}{"\n"}'   # prints team-alpha
 
-# 3
+# 3. run without -n, confirm placement
 k run scratch --image=busybox:1.36 -- sleep 3600
-k get pod scratch -o jsonpath='{.metadata.namespace}{"\n"}'   # team-alpha
+k get pod scratch -o jsonpath='{.metadata.namespace}{"\n"}'  # team-alpha
 
-# 4
+# 4. cluster-scoped types to file
 k api-resources --namespaced=false -o name > /tmp/cluster-scoped.txt
 
-# 5
+# 5. reset default ns
 k config set-context --current --namespace=default
 ```
 
-Why: resources follow the *context's* namespace, not `default` — this is the mechanic behind "my pod disappeared" traps.
+Why: `set-context --current --namespace` writes the default namespace into the active context so subsequent commands need no `-n`; `api-resources --namespaced=false` is the authoritative source of cluster-scoped types (Node, PV, StorageClass, ClusterRole, CRD, IngressClass, PriorityClass, …).
 
 ## Solution 4 — jsonpath and custom-columns
 
 ```bash
-# 1 — tr splits the space-separated jsonpath output into lines
-k get pods -n kube-system -o jsonpath='{.items[*].spec.containers[*].image}' \
+# 1. unique images
+k get po -n kube-system -o jsonpath='{.items[*].spec.containers[*].image}' \
   | tr ' ' '\n' | sort -u > /tmp/ks-images.txt
-cat /tmp/ks-images.txt
 
-# 2
-k get pods -n kube-system -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName
+# 2. custom columns
+k get po -n kube-system -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName
 
-# 3
+# 3. kubelet version per node
 k get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.kubeletVersion}{"\n"}{end}'
 ```
 
-Why: `jsonpath | tr | sort -u` is the canonical "unique images to a file" answer; the range/end form gives you line-per-item output for any list.
+Why: jsonpath `[*]` flattens all containers' images onto one space-separated line, so `tr`+`sort -u` dedupes them; `custom-columns` maps a header to a jsonpath expression; the `{range}…{end}` construct iterates items to emit one line each with a real newline.
 
 ## Solution 5 — multi-container pod, shared volume
-
-```bash
-k run web-logs --image=busybox:1.36 $do -- sh -c 'while true; do date >> /data/out.log; sleep 2; done' > /tmp/web-logs.yaml
-# edit: rename container to writer, add volume + second container
-vim /tmp/web-logs.yaml
-```
-
-Final manifest:
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
   name: web-logs
+  namespace: default
 spec:
-  volumes:
-    - name: logs
-      emptyDir: {}
   containers:
     - name: writer
       image: busybox:1.36
@@ -331,15 +344,17 @@ spec:
       volumeMounts:
         - name: logs
           mountPath: /data
+  volumes:
+    - name: logs
+      emptyDir: {}
 ```
 
 ```bash
-k apply -f /tmp/web-logs.yaml
-k get pod web-logs            # 2/2 Running
-k logs web-logs -c reader     # streaming dates
+k apply -f web-logs.yaml
+k logs web-logs -c reader --tail=5   # streaming dates written by writer
 ```
 
-Why: containers never share a filesystem implicitly — the emptyDir mount on both sides is the whole pattern; `-c` selects the container for logs/exec.
+Why: both containers mount the same `emptyDir` at `/data`, so `writer`'s appends are visible to `reader`'s `tail -F`; the shared volume is the only coupling needed.
 
 ## Solution 6 — init container
 
@@ -348,32 +363,32 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: initialized-web
+  namespace: default
 spec:
-  volumes:
-    - name: workdir
-      emptyDir: {}
   initContainers:
     - name: render
       image: busybox:1.36
       command: ["sh", "-c", "echo week01 > /work/index.html"]
       volumeMounts:
-        - name: workdir
+        - name: web
           mountPath: /work
   containers:
     - name: web
       image: nginx:1.27
       volumeMounts:
-        - name: workdir
+        - name: web
           mountPath: /usr/share/nginx/html
+  volumes:
+    - name: web
+      emptyDir: {}
 ```
 
 ```bash
-k apply -f /tmp/initialized-web.yaml
-k get pod initialized-web             # watch Init:0/1 -> PodInitializing -> Running
+k apply -f initialized-web.yaml
 k exec initialized-web -c web -- cat /usr/share/nginx/html/index.html   # week01
 ```
 
-Why: the init container runs to completion before `web` starts; the emptyDir outlives it, handing off the rendered file.
+Why: the init container runs to completion first, writing the file into the shared `emptyDir`; nginx then starts and serves the already-populated volume — init containers are the exam-standard way to prepare data before the main container.
 
 ## Solution 7 — native sidecar
 
@@ -382,298 +397,278 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: app-sidecar
+  namespace: default
 spec:
-  volumes:
-    - name: applog
-      emptyDir: {}
   initContainers:
-    - name: shipper
+    - name: shipper           # native sidecar = initContainer + restartPolicy Always
       image: busybox:1.36
-      restartPolicy: Always        # <- this one field turns an init container into a sidecar
+      restartPolicy: Always
       command: ["sh", "-c", "tail -F /var/log/app/app.log"]
       volumeMounts:
-        - name: applog
+        - name: logs
           mountPath: /var/log/app
   containers:
     - name: app
       image: busybox:1.36
-      command: ["sh", "-c", "while true; do date >> /var/log/app/app.log; sleep 3; done"]
+      command: ["sh", "-c", "mkdir -p /var/log/app; while true; do date >> /var/log/app/app.log; sleep 3; done"]
       volumeMounts:
-        - name: applog
+        - name: logs
           mountPath: /var/log/app
+  volumes:
+    - name: logs
+      emptyDir: {}
 ```
 
 ```bash
-k apply -f /tmp/app-sidecar.yaml
-k get pod app-sidecar                 # 2/2 Running (sidecar counts in READY)
-k logs app-sidecar -c shipper         # timestamps
+k apply -f app-sidecar.yaml
+k get pod app-sidecar                 # 2/2 READY
+k logs app-sidecar -c shipper --tail=5
 ```
 
-Why: `initContainers` + `restartPolicy: Always` is the native sidecar (beta/on-by-default v1.29, stable v1.33): guaranteed start-before-app, runs for pod lifetime, restarts independently. A plain second container would give no ordering guarantee.
+Why: `restartPolicy: Always` on an init container makes it a native sidecar — the kubelet starts it during the init phase (so it's up before `app`), keeps it alive for the pod's lifetime, and it counts as a ready container (`2/2`). A plain second `containers` entry would give no start-ordering guarantee.
 
-## Solution 8 — deployment lifecycle under pressure
+## Solution 8 — deployment scale, rollout, rollback
 
 ```bash
-# 1
-k create deployment release --image=nginx:1.26 --replicas=2
+k create deployment frontend --image=nginx:1.25 --replicas=4
+k scale deployment frontend --replicas=6
+k set image deployment/frontend nginx=nginx:1.27
+k annotate deployment/frontend kubernetes.io/change-cause="bump to 1.27"
+k rollout status deployment/frontend
 
-# 2
-k scale deployment release --replicas=5
-
-# 3
-k set image deployment/release nginx=nginx:1.27
-k annotate deployment/release kubernetes.io/change-cause="bump to 1.27"
-k rollout status deployment/release
-
-# 4 — rollout starts, new RS pods stuck ImagePullBackOff, rollout status hangs;
-#     old pods keep serving because maxUnavailable=25% throttles the teardown
-k set image deployment/release nginx=nginx:1.99-does-not-exist
-k get pods -l app=release             # mix of Running (old RS) and ImagePullBackOff (new RS)
-k rollout status deployment/release   # ctrl+c after observing it stall
-
-# 5
-k rollout undo deployment/release
-k rollout status deployment/release   # successfully rolled out
-k get deployment release -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'   # nginx:1.27
-k rollout history deployment/release  # note: undo created a NEW revision
+k rollout undo deployment/frontend
+k rollout status deployment/frontend
+k get deploy frontend -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'   # nginx:1.25
 ```
 
-Why: a rollback is just re-promoting the previous ReplicaSet's template — which is also why a botched rollout never takes down all replicas: the old RS is still there, still scaled.
+Why: `set image` changes `.spec.template`, creating a new ReplicaSet (revision 2); `rollout undo` with no `--to-revision` copies the previous revision's template back, restoring `nginx:1.25`. The container name in `set image` (`nginx=`) must match the template's container name, which `kubectl create deployment` names after the **image base name** (`nginx` here, from `nginx:1.25`) — **not** after the deployment name — verify with `k get deploy frontend -o jsonpath='{.spec.template.spec.containers[0].name}'` if unsure.
 
-## Solution 9 — pod lifecycle forensics
+## Solution 9 — inspect the control plane on kind
 
 ```bash
-# 1
-k run p-always --image=busybox:1.36 --restart=Always -- sh -c "sleep 5; exit 1"
-k run p-onfailure --image=busybox:1.36 --restart=OnFailure -- sh -c "sleep 5; exit 1"
-k run p-never --image=busybox:1.36 --restart=Never -- sh -c "sleep 5; exit 1"
+# 1. static-pod manifests
+docker exec cka-control-plane ls /etc/kubernetes/manifests
+# etcd.yaml  kube-apiserver.yaml  kube-controller-manager.yaml  kube-scheduler.yaml
 
-# wait ~2 min, then:
-k get pods p-always p-onfailure p-never
-# p-always     0/1  CrashLoopBackOff  (phase: Running)
-# p-onfailure  0/1  CrashLoopBackOff  (phase: Running)
-# p-never      0/1  Error             (phase: Failed)
+# 2. service CIDR flag from the apiserver manifest
+docker exec cka-control-plane grep -- '--service-cluster-ip-range' /etc/kubernetes/manifests/kube-apiserver.yaml
+# --service-cluster-ip-range=10.96.0.0/12
 
-# 3
-k get pods --field-selector=status.phase=Failed          # only p-never
-k get pod p-always -o jsonpath='restarts={.status.containerStatuses[0].restartCount} lastExit={.status.containerStatuses[0].lastState.terminated.exitCode}{"\n"}'
+# 3. etcd data-dir
+docker exec cka-control-plane grep -- '--data-dir' /etc/kubernetes/manifests/etcd.yaml
+# --data-dir=/var/lib/etcd
+
+# 4. control-plane pods and mirror-pod tell
+k get pods -n kube-system -o wide | egrep 'apiserver|etcd|scheduler|controller-manager'
 ```
 
-Why, one sentence each:
+Why: kubeadm/kind run the control plane as static pods managed by the control-plane kubelet from `/etc/kubernetes/manifests`; the API objects for them are **mirror pods** whose names are suffixed with the node name (e.g. `kube-apiserver-cka-control-plane`) and which cannot be edited via the API — you change them by editing the file on the node. `--service-cluster-ip-range=10.96.0.0/12` matches this lab's `serviceSubnet` from `kind-config.yaml`.
 
-- `p-always`: Always restarts on any exit, so the pod stays phase `Running` while cycling through exponential backoff (`CrashLoopBackOff` is a container waiting-reason, not a phase).
-- `p-onfailure`: identical here because the exit code is non-zero; it would differ on exit 0 (pod would go `Succeeded`).
-- `p-never`: no restart is ever attempted, all containers terminated with non-zero, so the pod reaches terminal phase `Failed` (STATUS shows `Error`).
-
-## Solution 10 — the selector immutability wall
+## Solution 10 — CRD and custom resource
 
 ```bash
-# 1 — the attempt
-k edit deployment legacy-api
-# change .spec.selector.matchLabels and .spec.template.metadata.labels to add tier: backend, save
-# -> rejected: "spec.selector: Invalid value: ... field is immutable"
+# 1. CRD present + group/version/scope
+k get crds | grep widgets
+k get crd widgets.demo.cka.io -o jsonpath='{.spec.group}{" "}{.spec.versions[0].name}{" "}{.spec.scope}{"\n"}'
+# demo.cka.io v1 Namespaced
 
-# 2 — the accepted fix: recreate with the corrected spec
-k get deployment legacy-api -o yaml > /tmp/legacy-api.yaml
-vim /tmp/legacy-api.yaml   # add tier: backend to BOTH selector.matchLabels and template.metadata.labels;
-                           # strip status:, metadata.uid/resourceVersion/creationTimestamp/generation
-k delete deployment legacy-api
-k apply -f /tmp/legacy-api.yaml
+# 2. type served + short name
+k api-resources | grep -i widget
+# widgets   wd   demo.cka.io/v1   true   Widget
+
+# 3. all Widget CRs everywhere
+k get widgets -A
+
+# 4. spec.size of blue-widget
+k get widget blue-widget -o jsonpath='{.spec.size}{"\n"}'   # large
 ```
-
-Corrected manifest (cleaned):
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: demo.cka.io/v1
+kind: Widget
 metadata:
-  name: legacy-api
-  labels:
-    app: legacy-api
+  name: red-widget
+  namespace: default
 spec:
-  replicas: 2
+  size: small
+  replicas: 1
+```
+
+```bash
+k apply -f red-widget.yaml
+k get widgets
+```
+
+Why: once the CRD is applied, the API server serves the new kind exactly like a built-in — `get`, `describe`, jsonpath, short names, and RBAC all work. There is no imperative generator for arbitrary CRs, so you author the manifest by hand against the CRD's `openAPIV3Schema`. The CRD itself is cluster-scoped; the `Widget` instances are namespaced because `spec.scope: Namespaced`.
+
+## Solution 11 — kubeconfig contexts
+
+```bash
+# 1. inspect
+k config current-context           # kind-cka
+k config get-contexts
+
+# 2. create a new context reusing cluster + user, new default ns
+k config set-context cka-alpha --cluster=kind-cka --user=kind-cka --namespace=team-alpha
+
+# 3. switch and prove
+k config use-context cka-alpha
+k get pods                          # lists team-alpha (the scratch pod from Task 3)
+k config view --minify -o jsonpath='{..namespace}{"\n"}'   # team-alpha
+
+# 4. switch back
+k config use-context kind-cka
+```
+
+Why: a context is just a named binding of an existing cluster + user + optional namespace; `set-context <name>` with those three flags creates it without touching credentials, and `use-context` activates it. `--minify` restricts `config view` to the active context, so the namespace it prints is the one in effect.
+
+## Solution 12 — api-resources and explain superpowers
+
+```bash
+# 1. apiVersion + short name
+k api-resources | egrep -i 'networkpolicy|horizontalpodautoscaler'
+# networkpolicies          netpol   networking.k8s.io/v1   true   NetworkPolicy
+# horizontalpodautoscalers hpa      autoscaling/v2         true   HorizontalPodAutoscaler
+
+# 2. tolerations schema path
+k explain pod --recursive | grep -i tolerations
+# → pod.spec.tolerations
+k explain pod.spec.tolerations
+
+# 3. rollingUpdate fields
+k explain deployment.spec.strategy.rollingUpdate
+
+# 4. apps group kinds to file
+k api-resources --api-group=apps -o name > /tmp/apps-kinds.txt
+```
+
+Why: `api-resources` is the offline map of every served type (name, short name, group/version, namespaced, kind); `explain --recursive | grep` locates any field's exact nesting without a doc tab; `--api-group` filters the map to one group (`apps` → deployments, replicasets, statefulsets, daemonsets).
+
+## Solution 13 — HARD: a pod that will not schedule
+
+```bash
+# Diagnose from cluster state
+k get pod stuck                        # STATUS Pending
+k describe pod stuck | sed -n '/Events/,$p'
+# Warning  FailedScheduling  ... 0/3 nodes are available:
+#   3 node(s) didn't match Pod's node affinity/selector.
+k get pod stuck -o jsonpath='{.spec.nodeSelector}{"\n"}'   # {"disktype":"ssd"}
+k get nodes -L disktype                # no node carries disktype=ssd
+
+# Fix WITHOUT touching the pod: satisfy the selector by labelling a node
+k label node cka-worker disktype=ssd
+k get pod stuck -w                      # → Running (Ctrl-C when Running)
+```
+
+Why: the pod was blocked at the scheduler **filter** stage — the `NodeAffinity` predicate (which also evaluates `nodeSelector`) eliminated every node because none matched `nodeSelector: disktype=ssd`, hence the `FailedScheduling` event ("didn't match Pod's node affinity/selector"). Since we may not edit the pod, we make a node satisfy the constraint by adding the missing label; the scheduler re-evaluates the still-Pending pod on its next cycle and binds it. One line: **the scheduler's node-filter predicate rejected all nodes for a nodeSelector mismatch.**
+
+## Solution 14 — HARD: pod adoption, reaping, and the selector-immutability trap
+
+```bash
+# 1. Is web-legacy owned by / at risk from the Deployment's ReplicaSet?
+k get pod web-legacy -o jsonpath='{.metadata.ownerReferences}{"\n"}'   # empty → no owner
+k get rs -l app=web -o jsonpath='{.items[0].spec.selector}{"\n"}'
+# {"matchLabels":{"app":"web","pod-template-hash":"6f8c9dcb5d"}}
+```
+
+**No — and not at risk.** A Deployment always builds its ReplicaSet's selector with the auto-generated `pod-template-hash` label (here `app=web,pod-template-hash=6f8c9dcb5d`), and every pod that RS creates carries the same hash. `web-legacy` has only `app=web` and **no** `pod-template-hash`, so it does **not** match the RS selector: the RS never sees it, never adopts it, and never reaps it. The `pod-template-hash` mechanism exists precisely to stop a Deployment's ReplicaSet from cross-adopting stray pods that merely share the app label. Confirm the non-event with `k describe rs -l app=web | sed -n '/Events/,$p'` — there is no adoption in the Events.
+
+```bash
+# 2. a BARE ReplicaSet whose selector really matches web-legacy
+cat <<'EOF' | k apply -f -
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-rs
+  namespace: default
+spec:
+  replicas: 1
   selector:
     matchLabels:
-      app: legacy-api
-      tier: backend
+      app: web
   template:
     metadata:
       labels:
-        app: legacy-api
-        tier: backend
+        app: web
     spec:
       containers:
         - name: nginx
           image: nginx:1.27
+EOF
+
+k get pod web-legacy -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}{"\n"}'   # ReplicaSet/web-rs
+k get rs web-rs      # DESIRED 1, CURRENT 1 — web-legacy IS that replica
 ```
+
+A hand-authored ReplicaSet's selector is exactly what you wrote — `app=web`, with **no** `pod-template-hash` — so it matches `web-legacy`. Because `web-legacy` matches the selector **and** has no controller `ownerReference`, the ReplicaSet **adopts** it: `web-legacy` now carries an `ownerReferences` entry pointing at `web-rs` and is counted as the one desired replica (so the RS creates no pod of its own). It is now genuinely **at risk** — `k scale rs web-rs --replicas=0` or `k delete rs web-rs` (default cascade) reaps `web-legacy` with it. This is the adoption/reaping the Deployment could never cause. (The Deployment's own hash-labelled pods do match `app=web`, but they already have a controller owner, so `web-rs` cannot claim them — overlapping bare-RS selectors are a documented footgun, not an adoption.)
 
 ```bash
-# 3
-k get deploy legacy-api -o jsonpath='{.spec.selector.matchLabels}{"\n"}'   # {"app":"legacy-api","tier":"backend"}
-k get pods -l app=legacy-api,tier=backend                                  # 2 pods Running
-k get deploy legacy-api                                                    # 2/2 AVAILABLE
-```
-
-Why: `apps/v1` selectors are immutable by design (mutable selectors orphan pods), so the only paths are recreate (brief downtime — exam-acceptable) or a parallel second Deployment then delete the old one (zero downtime — mention it if the task forbids downtime). One-liner alternative to delete+apply: `k replace --force -f /tmp/legacy-api.yaml`. Note `--cascade=orphan` does NOT give a clean zero-downtime path here: the new ReplicaSet's selector includes a fresh `pod-template-hash`, so it will not adopt the orphans and you would leak unmanaged pods.
-
-## Solution 11 — control-plane surgery on kind
-
-```bash
-# 1
-docker exec -it cka-control-plane bash
-ls /etc/kubernetes/manifests
-# etcd.yaml  kube-apiserver.yaml  kube-controller-manager.yaml  kube-scheduler.yaml
-
-# 2 (inside the node)
-mv /etc/kubernetes/manifests/kube-scheduler.yaml /root/kube-scheduler.yaml
-exit
-# outside — kubelet noticed the file vanish and killed the static pod within seconds:
-k get pods -n kube-system | grep scheduler        # gone
-
-# 3
-k run victim --image=nginx:1.27
-k get pod victim                                   # Pending
-k describe pod victim | tail -5                    # Events: <none>  <- the signature
-# Pending + ZERO events = nothing tried to schedule it = scheduler is down.
-```
-
-Step 4 — scheduling is just setting `spec.nodeName`; do it yourself:
-
-```yaml
-apiVersion: v1
-kind: Pod
+# 3. retarget the selector — it is IMMUTABLE, so delete (orphaning) and recreate
+k delete rs web-rs --cascade=orphan     # detaches web-legacy instead of reaping it
+cat <<'EOF' | k apply -f -
+apiVersion: apps/v1
+kind: ReplicaSet
 metadata:
-  name: bypass
-spec:
-  nodeName: cka-worker
-  containers:
-    - name: web
-      image: nginx:1.27
-```
-
-```bash
-k apply -f /tmp/bypass.yaml
-k get pod bypass -o wide       # Running on cka-worker, no scheduler involved
-
-# 5
-docker exec cka-control-plane mv /root/kube-scheduler.yaml /etc/kubernetes/manifests/kube-scheduler.yaml
-k get pods -n kube-system | grep scheduler   # kube-scheduler-cka-control-plane Running (mirror pod is back)
-k get pod victim -o wide                      # now scheduled and Running — the watch queue drained retroactively
-```
-
-Why: static pods are managed purely by kubelet file-watch on `staticPodPath`; a pod with `nodeName` preset skips the scheduler entirely, which is both the workaround and the proof of diagnosis.
-
-## Solution 12 — crictl on a worker node
-
-```bash
-# 1
-k get pods -l app=api -o wide     # note NODE column, e.g. cka-worker
-
-# 2
-docker exec -it cka-worker bash
-crictl pods --name api                          # sandbox list, grab the POD ID if needed
-crictl ps | grep api                            # container ID for the httpd container
-crictl logs --tail=5 <container-id>
-crictl images | grep httpd                      # docker.io/library/httpd  2.4
-exit
-
-# 3 — bonus, inside the node
-docker exec -it cka-worker bash
-systemctl status kubelet --no-pager | head -5   # active (running)
-journalctl -u kubelet --no-pager | tail -20
-exit
-```
-
-Why: when kubectl is unavailable or lying (API down, kubelet sick), `crictl ps/pods/logs` against the containerd socket is the ground truth; `crictl ps -a` additionally shows crashed containers that `crictl ps` hides.
-
-## Solution 13 — CRDs and custom resources
-
-```bash
-# 1
-k get crds                                            # backups.stable.example.com
-k get crd backups.stable.example.com -o yaml | head -30   # group, scope: Namespaced, versions
-k api-resources | grep stable.example.com             # backups  bk  stable.example.com/v1  true  Backup
-
-# 2
-k explain backup.spec            # shows source, schedule, retainDays from the CRD schema
-k explain backup --recursive     # full tree
-```
-
-```yaml
-apiVersion: stable.example.com/v1
-kind: Backup
-metadata:
-  name: nightly-etcd
+  name: web-rs
   namespace: default
 spec:
-  source: etcd
-  schedule: "0 2 * * *"
-  retainDays: 7
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web
+      track: stable
+  template:
+    metadata:
+      labels:
+        app: web
+        track: stable
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+EOF
+
+# confirm
+k get pods -l app=web,track=stable                                    # 2 Running, both labels (web-rs's fresh pods)
+k get pod web-legacy -o jsonpath='{.metadata.ownerReferences}{"\n"}'  # empty again → orphaned and safe
 ```
 
+Why: a ReplicaSet's `.spec.selector` is **immutable** — `k edit`/`k apply` a changed selector fails with `field is immutable`, so the only route is delete-and-recreate. Deleting with `--cascade=orphan` detaches the RS's pods (clearing their `ownerReferences`) instead of garbage-collecting them, which is what preserves the already-adopted `web-legacy`. The recreated `web-rs` selects `app=web,track=stable`; `web-legacy` (only `app=web`) no longer matches, so it is neither adopted nor counted, and `web-rs` spins up two fresh pods carrying both labels. The selector must equal the template labels or the API server rejects the object with `selector does not match template labels`.
+
+## Solution 15 — HARD: break and restore the scheduler on kind
+
 ```bash
-k apply -f /tmp/backup.yaml
+# 1. remove the scheduler manifest → kubelet stops the static pod
+docker exec cka-control-plane mv /etc/kubernetes/manifests/kube-scheduler.yaml /tmp/kube-scheduler.yaml
+sleep 15
+k get pods -n kube-system | grep scheduler        # gone
 
-# 4
-k get backup
-k get bk
-k get backups.stable.example.com
-k get backup nightly-etcd -o jsonpath='{.spec.retainDays}{"\n"}'   # 7
+# 2. create a pod and watch it hang
+k run orphan --image=nginx:1.27
+k get pod orphan                                    # Pending
+k describe pod orphan | sed -n '/Events/,$p'        # NO FailedScheduling event — total silence
 
-# 5
-echo "A CRD only registers the API type; without an operator/controller watching Backup objects and reconciling them, nothing acts on the stored spec." > /tmp/operator.txt
+# 3. restore
+docker exec cka-control-plane mv /tmp/kube-scheduler.yaml /etc/kubernetes/manifests/kube-scheduler.yaml
+sleep 15
+k get pods -n kube-system | grep scheduler          # Running again
+k get pod orphan -w                                  # → Running (Ctrl-C when Running)
 ```
 
-Why: the CRD gives you storage, validation, and kubectl support for a new kind — behavior requires a controller; `<plural>.<group>` is the collision-proof way to address any resource type.
+Why: the scheduler is a static pod; removing its manifest makes the kubelet tear the pod down, and with nothing evaluating unscheduled pods, `orphan` sits `Pending` with **no scheduling events at all**. Restoring the file makes the kubelet recreate the static pod within ~15s; the revived scheduler picks up the still-Pending pod and binds it. One line: **scheduler-down = `Pending` with zero `FailedScheduling` events (silence); no-node-fits = `Pending` with a `FailedScheduling` event naming the reason.**
 
-## Solution 14 — kubeconfig contexts
+---
+
+Cleanup (optional, to reset the lab for the next module):
 
 ```bash
-# 1 — reuse cluster+user names exactly as they appear in `k config get-contexts`
-k config set-context cka-alpha --cluster=kind-cka --user=kind-cka --namespace=team-alpha
-
-# 2
-k config use-context cka-alpha
-k config get-contexts            # * on cka-alpha, NAMESPACE=team-alpha
-
-# 3
-k get pods                       # scratch pod, no -n needed
-
-# 4
-k config view --minify -o jsonpath='{.clusters[0].cluster.server}{"\n"}'
-
-# 5
+k delete pod web-01 once scratch web-logs initialized-web app-sidecar stuck orphan web-legacy --ignore-not-found $now
+k delete rs web-rs --ignore-not-found
+k delete deploy api frontend web --ignore-not-found
+k delete widget blue-widget red-widget --ignore-not-found
+k delete crd widgets.demo.cka.io --ignore-not-found
+k delete ns team-alpha --ignore-not-found
+k label node cka-worker disktype- 2>/dev/null
+k config delete-context cka-alpha 2>/dev/null
 k config use-context kind-cka
-```
-
-Why: a context is only a named (cluster, user, namespace) tuple — creating one costs nothing and `--minify` scopes `config view` to the active context, making jsonpath extraction deterministic.
-
-## Solution 15 — delete a node and observe
-
-```bash
-# 1
-k get pods -l app=node-lab -o wide | grep cka-worker2
-
-# 2
-k delete node cka-worker2
-k get pods -l app=node-lab -o wide -w    # old pods on worker2 disappear; replacements appear on cka-worker
-```
-
-What did what: deleting the Node object makes the pod garbage collector (in kube-controller-manager) delete pods bound to a nonexistent node; the ReplicaSet controller sees replicas < desired and creates replacements; the scheduler binds them to the only remaining worker. Note the kubelet process on `cka-worker2` is still running — only the API object is gone.
-
-```bash
-# 3 — restart the "machine"; on restart the kubelet self-registers (--register-node defaults to true)
-docker restart cka-worker2
-k get nodes -w                            # cka-worker2 reappears, NotReady -> Ready
-k get pods -n kube-system -o wide | grep cka-worker2   # kindnet + kube-proxy DaemonSet pods recreated
-```
-
-Why: node identity is just an API object continuously asserted by the kubelet; DaemonSet pods return automatically because the DaemonSet controller targets *nodes*, while the rescheduled Deployment pods stay where they are — Kubernetes never rebalances running pods on node re-join (that asymmetry is a favorite exam misconception).
-
-```bash
-# 4 — cleanup
-k delete deploy node-lab api release legacy-api web-logs 2>/dev/null
-k delete pod web-01 app-sidecar initialized-web p-always p-onfailure p-never victim bypass once $now 2>/dev/null
-k delete ns team-alpha
-k delete crd backups.stable.example.com
 ```

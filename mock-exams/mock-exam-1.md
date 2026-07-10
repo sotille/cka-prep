@@ -2,7 +2,8 @@
 
 A complete 16-task exam covering all five domains at the official weight distribution,
 tuned slightly below real-exam difficulty. Goal: finish under time, score above 66%,
-and calibrate where your minutes go.
+and calibrate where your minutes go. Most tasks carry a single, clean fault or a single
+objective — save the multi-fault, cluster-wide chaos for mock exams 2 and 3.
 
 ## Rules — read once, then start the clock
 
@@ -13,9 +14,9 @@ and calibrate where your minutes go.
 3. Allowed references: `kubernetes.io/docs`, `kubernetes.io/blog`, `helm.sh/docs`. Nothing else — no notes, no chat, no search engine.
 4. Weights sum to 100. **Pass mark: 66.** Partial credit exists (see solutions rubric).
 5. Grading is on **final cluster/file state**. Solve tasks in any order; a 60-second triage pass first is a good habit.
-6. Query answers go to **exact file paths under `/tmp/exam/`**. Files are graded literally; a missing or misnamed file scores zero for that part.
+6. Query answers go to **exact file paths under `/tmp/exam/`**. Files are graded literally; a missing or misnamed file scores zero for that part. Write only what is asked — no trailing prose.
 7. Course conventions are assumed active: `alias k=kubectl`, `export do="--dry-run=client -o yaml"`, `export now="--grace-period=0 --force"`.
-8. Lab-to-exam mapping: this runs on the 3-node kind cluster `cka` (context `kind-cka`; nodes `cka-control-plane`, `cka-worker`, `cka-worker2`). Where the real exam says `ssh node01`, the lab equivalent is `docker exec -it <node-name> bash`. On the real exam every task begins with a `kubectl config use-context ...` line — run `kubectl config use-context kind-cka` now and build the reflex.
+8. Lab-to-exam mapping: this runs on the 3-node kind cluster `cka` (context `kind-cka`; nodes `cka-control-plane`, `cka-worker`, `cka-worker2`). Where the real exam says `ssh node01` + `sudo -i`, the lab equivalent is `docker exec -it <node-name> bash` (you are already root). On the real exam every task begins with a `kubectl config use-context ...` line — run `kubectl config use-context kind-cka` now and build the reflex.
 9. One lab caveat: kind's default CNI (kindnet) does **not enforce** NetworkPolicy. The policy task is graded on the object spec, exactly as you would write it on an enforcing CNI.
 
 When the timer ends: stop, then self-grade with `mock-exam-1-solutions.md`.
@@ -42,7 +43,7 @@ Context: whole cluster.
 
 One of the cluster nodes is `NotReady`. Identify it, find the root cause, and fix it so the node returns to `Ready`. The fix must survive a node reboot.
 
-*Exam flavor: on the real exam you would `ssh node01` and use `sudo`; here use `docker exec -it <node-name> bash` (or one-shot `docker exec <node-name> <command>`).*
+*Exam flavor: on the real exam you would `ssh node01` and use `sudo -i`; here use `docker exec -it <node-name> bash` (or one-shot `docker exec <node-name> <command>`).*
 
 ## Task 4 — 6% — Expose an app on a fixed node port
 
@@ -78,7 +79,7 @@ Context: etcd runs as a static pod on the control plane. Client endpoint: `https
 
 Create a snapshot of the etcd database and store it **on your host machine** at `/tmp/exam/task7-snapshot.db`. Then write the snapshot status (hash, revision, total keys, size — table format) to `/tmp/exam/task7-status.txt`.
 
-*Exam flavor: on the real exam you `ssh` to the control-plane node where `etcdctl`/`etcdutl` are installed on the host and save directly to a host path. On kind, run the tools inside the etcd pod (or `docker exec` into `cka-control-plane`) and copy the snapshot out with `docker cp`.*
+*Exam flavor: on the real exam you `ssh` to the control-plane node where `etcdctl`/`etcdutl` are installed on the host and save directly to a host path. On kind the binaries live only inside the etcd pod (the distroless etcd image has no shell, and the node host has neither tool), so run them via `kubectl -n kube-system exec etcd-cka-control-plane -- etcdctl|etcdutl ...`. Reserve `docker exec cka-control-plane` for host-side steps — grepping the manifest for cert flags — and use `docker cp` to copy the snapshot out of the node.*
 
 ## Task 8 — 5% — Static provisioning
 
@@ -92,7 +93,7 @@ End state: PVC `Bound`, Pod `Running`.
 
 Context: namespace `secure-apps` contains pods `db` (label `role=db`), `api` (label `role=api`) and `client` (label `role=client`).
 
-Create a NetworkPolicy `db-allow-api` in namespace `secure-apps` so that only pods labeled `role=api` may connect to pods labeled `role=db`, and only on TCP port 5432. All other ingress to the `db` pods must be denied. Do not restrict traffic to any other pods in the namespace.
+Create a NetworkPolicy `db-allow-api` in namespace `secure-apps` so that only pods labeled `role=api` may connect to pods labeled `role=db`, and only on TCP port 5432. All other ingress to the `db` pods must be denied. Do not restrict traffic to any other pods in the namespace, and leave egress unrestricted.
 
 *(Graded on the policy spec — see rule 9.)*
 
@@ -106,7 +107,7 @@ End state: pod `Running` on `cka-control-plane`.
 
 ## Task 11 — 6% — Service without endpoints
 
-Context: namespace `commerce` contains a Deployment `catalog-api` (2 replicas, all Running) and a Service `catalog-svc` (port 80). The app team reports DNS resolves but every connection to the service fails.
+Context: namespace `commerce` contains a Deployment `catalog-api` (2 replicas, all Running) and a Service `catalog-svc` (service port 80). The app team reports DNS resolves but every connection to the service fails.
 
 Fix the **Service** (do not modify the Deployment) so traffic reaches the pods. Then, from a temporary pod, request `http://catalog-svc.commerce/hostname` and write the response body to `/tmp/exam/task11-response.txt`.
 
@@ -138,7 +139,7 @@ Write all of the pod's log lines containing `level=ERROR` — and only those lin
 
 ## Task 15 — 7% — Gateway API routing
 
-Context: the Gateway API CRDs and a GatewayClass `exam-gc` are installed. Namespace `netz`. The backend is the Service `echo-svc` from Task 4 (your route is valid and gradable even if that Service does not exist).
+Context: the Gateway API CRDs and a GatewayClass `exam-gc` are installed. Namespace `netz`. The backend is the Service `echo-svc` from Task 4 (your route is valid and gradable even if that Service does not exist yet).
 
 Create a Gateway `web-gw` in namespace `netz`: gatewayClassName `exam-gc`, a single listener named `http`, protocol HTTP, port 80, allowing routes only from the same namespace.
 

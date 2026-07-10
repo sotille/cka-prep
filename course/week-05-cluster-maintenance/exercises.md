@@ -188,22 +188,24 @@ On the node:
 docker exec cka-control-plane grep -E 'data-dir|cert-file|key-file|trusted-ca|listen-client|image:' /etc/kubernetes/manifests/etcd.yaml
 ```
 
-Expected answers: (a) `--data-dir=/var/lib/etcd`; (b) `https://127.0.0.1:2379` (plus the node IP variant); (c) `--trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt`, `--cert-file=/etc/kubernetes/pki/etcd/server.crt`, `--key-file=/etc/kubernetes/pki/etcd/server.key`; (d) from the `image:` line, e.g. `registry.k8s.io/etcd:3.5.x-0`.
+Expected answers: (a) `--data-dir=/var/lib/etcd`; (b) `https://127.0.0.1:2379` (plus the node IP variant); (c) `--trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt`, `--cert-file=/etc/kubernetes/pki/etcd/server.crt`, `--key-file=/etc/kubernetes/pki/etcd/server.key`; (d) from the `image:` line, e.g. `registry.k8s.io/etcd:3.6.x-0` on the current kind lab (older clusters ran `3.5.x-0`). The 3.5→3.6 jump matters: etcd 3.6 removed the `etcdctl snapshot status`/`snapshot restore` subcommands (they now live only in `etcdutl`), which is why the tasks below verify and restore with `etcdutl`.
 
 Why: everything etcdctl needs is in the manifest — grepping it beats memorizing paths and is the first move of every etcd task.
 
 ## Solution 2 — etcd snapshot + verification
 
 ```bash
-k -n kube-system exec etcd-cka-control-plane -- sh -c \
-  'ETCDCTL_API=3 etcdctl snapshot save /var/lib/etcd/snap.db \
+k -n kube-system exec etcd-cka-control-plane -- \
+  etcdctl snapshot save /var/lib/etcd/snap.db \
    --endpoints=https://127.0.0.1:2379 \
    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
    --cert=/etc/kubernetes/pki/etcd/server.crt \
-   --key=/etc/kubernetes/pki/etcd/server.key'
+   --key=/etc/kubernetes/pki/etcd/server.key
 ```
 
-Verify (etcdutl ships in the etcd 3.5+ image; if absent, the deprecated `etcdctl snapshot status` works too):
+Note the direct exec of `etcdctl` — no `sh -c '...'` wrapper. The etcd 3.6.x-0 image is distroless and has no shell, so `exec ... -- sh -c '...'` fails with `exec: "sh": executable file not found`. Drop the inline `ETCDCTL_API=3` too: it is the default since etcdctl 3.4 and can't be set without a shell anyway.
+
+Verify with etcdutl (etcd 3.6 removed the `etcdctl snapshot status` subcommand — on older 3.5 images the deprecated `etcdctl snapshot status` still works):
 
 ```bash
 k -n kube-system exec etcd-cka-control-plane -- etcdutl snapshot status /var/lib/etcd/snap.db -w table
@@ -261,27 +263,29 @@ Why: restore is offline and must target an empty dir; repointing the hostPath (n
 ## Solution 4 — etcd health and membership
 
 ```bash
-k -n kube-system exec etcd-cka-control-plane -- sh -c \
-  'etcdctl --endpoints=https://127.0.0.1:2379 \
+k -n kube-system exec etcd-cka-control-plane -- \
+  etcdctl --endpoints=https://127.0.0.1:2379 \
    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
    --cert=/etc/kubernetes/pki/etcd/server.crt \
    --key=/etc/kubernetes/pki/etcd/server.key \
-   endpoint health'
+   endpoint health
 
-k -n kube-system exec etcd-cka-control-plane -- sh -c \
-  'etcdctl --endpoints=https://127.0.0.1:2379 \
+k -n kube-system exec etcd-cka-control-plane -- \
+  etcdctl --endpoints=https://127.0.0.1:2379 \
    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
    --cert=/etc/kubernetes/pki/etcd/server.crt \
    --key=/etc/kubernetes/pki/etcd/server.key \
-   endpoint status -w table'
+   endpoint status -w table
 
-k -n kube-system exec etcd-cka-control-plane -- sh -c \
-  'etcdctl --endpoints=https://127.0.0.1:2379 \
+k -n kube-system exec etcd-cka-control-plane -- \
+  etcdctl --endpoints=https://127.0.0.1:2379 \
    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
    --cert=/etc/kubernetes/pki/etcd/server.crt \
    --key=/etc/kubernetes/pki/etcd/server.key \
-   member list -w table'
+   member list -w table
 ```
+
+Exec `etcdctl` directly (no `sh -c` wrapper) — the distroless etcd 3.6 image has no shell, so the wrapped form fails with `exec: "sh": executable file not found`.
 
 Answers: one member (kind runs a single control-plane node), quorum = 1, tolerated failures = 0. The status table shows `IS LEADER = true` (a single member is always leader), the DB size, and the raft term.
 

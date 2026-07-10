@@ -49,7 +49,7 @@ Firefox inside the remote desktop is restricted to:
 - `kubernetes.io/docs` and `kubernetes.io/blog`
 - `helm.sh/docs`
 
-Nothing else. No Stack Overflow, no GitHub, no Google. Subdomains and other paths are blocked. This is why Section 6 (docs navigation) exists — the docs site search box is your only search engine.
+Nothing else. No Stack Overflow, no GitHub, no Google. These sites **and their subdomains** are permitted; unrelated sites and paths are blocked. This is why Section 6 (docs navigation) exists — the docs site search box is your only search engine.
 
 ### Copy/paste: the number-one environment trap
 
@@ -315,13 +315,13 @@ Every competency line from the current CKA curriculum, mapped to where this cour
 | Cluster Architecture (25%) | Prepare underlying infrastructure for installing a Kubernetes cluster | course/week-01-architecture | course/week-05-cluster-maintenance |
 | Cluster Architecture (25%) | Create and manage Kubernetes clusters using kubeadm | course/week-05-cluster-maintenance | labs/breakfix |
 | Cluster Architecture (25%) | Manage the lifecycle of Kubernetes clusters (upgrades) | course/week-05-cluster-maintenance | mock-exams |
-| Cluster Architecture (25%) | Implement and configure a highly-available control plane | course/week-05-cluster-maintenance | course/week-01-architecture |
+| Cluster Architecture (25%) | Highly-available control plane † | course/week-05-cluster-maintenance | course/week-01-architecture |
 | Cluster Architecture (25%) | Use Helm and Kustomize to install cluster components | course/week-02-workloads-config | course/week-10-final-prep |
 | Cluster Architecture (25%) | Understand extension interfaces (CNI, CSI, CRI) | course/week-01-architecture | course/week-08-networking (CNI), course/week-07-storage (CSI) |
 | Cluster Architecture (25%) | Understand CRDs, install and configure operators | course/week-02-workloads-config | course/week-10-final-prep |
 | Workloads & Scheduling (15%) | Application deployments, rolling updates and rollbacks | course/week-02-workloads-config | drills/speed-drills.md |
 | Workloads & Scheduling (15%) | Use ConfigMaps and Secrets to configure applications | course/week-02-workloads-config | drills/speed-drills.md |
-| Workloads & Scheduling (15%) | Configure workload autoscaling (HPA) | course/week-03-scheduling | mock-exams |
+| Workloads & Scheduling (15%) | Configure workload autoscaling (HPA) | course/week-02-workloads-config | mock-exams |
 | Workloads & Scheduling (15%) | Primitives for robust, self-healing application deployments | course/week-04-lifecycle-observability (probes) | course/week-02-workloads-config |
 | Workloads & Scheduling (15%) | Configure pod admission and scheduling (limits, affinity, taints) | course/week-03-scheduling | labs/breakfix |
 | Services & Networking (20%) | Understand connectivity between Pods | course/week-08-networking | course/week-09-troubleshooting |
@@ -338,6 +338,8 @@ Every competency line from the current CKA curriculum, mapped to where this cour
 | Troubleshooting (30%) | Monitor cluster and application resource usage | course/week-04-lifecycle-observability | course/week-09-troubleshooting |
 | Troubleshooting (30%) | Manage and evaluate container output streams (logs) | course/week-04-lifecycle-observability | course/week-09-troubleshooting |
 | Troubleshooting (30%) | Troubleshoot services and networking | course/week-09-troubleshooting | course/week-08-networking, labs/breakfix |
+
+† HA control plane is **not** a standalone line in the post-Feb-2025 curriculum — Cluster Architecture lists seven lines, and HA is folded into "Manage the lifecycle of Kubernetes clusters" above. It gets its own row here only because it is discrete and exam-relevant enough to study separately.
 
 Sanity check against the weights: the 30% domain is covered by *two* dedicated modules (weeks 04 and 09) plus the entire breakfix lab — that ratio is intentional and mirrors where the exam points are.
 

@@ -31,7 +31,7 @@ Node access: this lab substitutes `docker exec -it <node-name> bash` for the rea
 
 **Triage warning — read once, then start the timer.** This exam contains three cluster-wide faults: a control-plane component is down (Task 1), one node is broken (Task 10), and cluster DNS is broken (Task 13). Most other tasks depend on at least one of them — deployments will not create pods, service endpoints will not update, and PVCs will not bind until Task 1 is solved. Skim all 15 tasks in the first 5 minutes and fix the cluster-wide faults early. Per-task time targets sum to 126 minutes: you are not expected to finish everything. That is the point.
 
-Domain weights mirror the live exam: Troubleshooting 30, Cluster Architecture 25, Services & Networking 20, Workloads & Scheduling 15, Storage 10. Verify the current curriculum version on the CNCF curriculum page before exam day.
+Domain weights *approximate* the live blueprint but deliberately over-index the two hardest bands (killer-style): Troubleshooting 30, Cluster Architecture 29, Services & Networking 20, Workloads & Scheduling 11, Storage 10. The real exam is 30 / 25 / 20 / 15 / 10 — verify the current curriculum version on the CNCF curriculum page before exam day. The per-task domain tags and subtotals are in the solutions file.
 
 ---
 

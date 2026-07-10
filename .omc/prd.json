@@ -4,7 +4,7 @@
     {
       "id": "US-001",
       "title": "Exam-strategy masterclass + curriculum alignment",
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "course/00-exam-masterclass.md exists and covers: current CKA domain weights (Troubleshooting 30%, Cluster Architecture/Installation/Configuration 25%, Services & Networking 20%, Workloads & Scheduling 15%, Storage 10%), exam environment (PSI remote desktop, allowed kubernetes.io docs, killer.sh bundled), time-management/triage strategy, terminal setup, question patterns, and exam-day checklist",
         "Explicitly corrects the repo's stale assumption that Networking is 30% of the exam (old curriculum) and flags Troubleshooting as the real 30% domain",
@@ -14,7 +14,7 @@
     {
       "id": "US-002",
       "title": "Deep modules weeks 1-4 (architecture, workloads+config, scheduling, lifecycle/observability)",
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "course/week-01-architecture/, course/week-02-workloads-config/, course/week-03-scheduling/, course/week-04-lifecycle-observability/ each contain masterclass.md and exercises.md",
         "Each masterclass.md is a deep-dive (internals, failure modes, gotchas, speed techniques) covering every topic listed in the corresponding notes/week-NN file, at senior-engineer depth (not tutorial-level)",
@@ -26,7 +26,7 @@
     {
       "id": "US-003",
       "title": "Deep modules weeks 5-8 (cluster maintenance, security/RBAC, storage, networking)",
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "course/week-05-cluster-maintenance/, course/week-06-security-rbac/, course/week-07-storage/, course/week-08-networking/ each contain masterclass.md and exercises.md",
         "Week 5 covers kubeadm install/upgrade flow and etcd backup/restore with exact commands and flags",
@@ -38,7 +38,7 @@
     {
       "id": "US-004",
       "title": "Troubleshooting masterclass (30% domain) + break-and-fix labs",
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "course/week-09-troubleshooting/masterclass.md exists with systematic diagnosis playbooks for: crashing pods, unschedulable pods, node NotReady, control-plane component failures, service/DNS failures, and kubeconfig/auth failures",
         "course/week-09-troubleshooting/exercises.md has at least 12 troubleshooting scenarios with worked solutions",
@@ -49,7 +49,7 @@
     {
       "id": "US-005",
       "title": "Three full mock exams with solutions and grading",
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "mock-exams/mock-exam-1.md, mock-exam-2.md, mock-exam-3.md each contain 15-17 tasks with per-task weights that approximate current domain weights, context/cluster framing per task, and a 2-hour time budget",
         "Each mock exam has a matching mock-exam-N-solutions.md with full worked solutions and a self-grading rubric including the 66% pass threshold",
@@ -60,7 +60,7 @@
     {
       "id": "US-006",
       "title": "Weeks 9-10 exam-week program + daily speed drills",
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "course/week-10-final-prep/masterclass.md exists with: killer.sh session/debrief protocol, weak-area triage method, spaced-repetition plan for the final two weeks, and exam-day logistics checklist",
         "drills/speed-drills.md exists with timed daily drill circuits (task + time target) covering every exam domain",

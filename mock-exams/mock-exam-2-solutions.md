@@ -2,7 +2,9 @@
 
 Grade with the rubrics below. Award a component only if the finish state is actually observable on the cluster (`kubectl get ...`), not because "the command looked right". Pass line: **66/100**.
 
-Time budgets sum to 105 minutes — the remaining 15 are your review/flag buffer, same discipline as the real exam.
+Time budgets sum to 106 minutes — the remaining 14 are your review/flag buffer, same discipline as the real exam.
+
+**Dependency you must respect while grading:** Task 16 (the kube-scheduler is down) blocks scheduling cluster-wide. Any task that creates *new* pods — Task 2's fixed rollout, Task 8, Task 10's rollout, Task 12, Task 14 — will sit `Pending` until Task 16 is solved. Task 15's static pod is the exception: it bypasses the scheduler entirely and runs regardless. On the real exam this "fix the platform before you can finish the app tasks" ordering is exactly the skill under test.
 
 ---
 
@@ -75,7 +77,7 @@ k -n troubled patch deploy orders-api --type=json \
 k -n troubled get deploy orders-api            # 3/3
 ```
 
-Why: `describe` shows both failures sequentially — a pulled-image failure masks the probe failure until the image is fixed; always re-check after the first fix.
+Why: `describe` shows both failures sequentially — a pulled-image failure masks the probe failure until the image is fixed; always re-check after the first fix. (The *original* bad-image pods were already scheduled before the scheduler fault, so diagnosis works immediately. But `set image` spawns a new ReplicaSet whose *new* pods must be placed by kube-scheduler — a `nodeSelector` is a constraint the scheduler evaluates, not a bypass — so they stay `Pending` and 3/3 Ready is only reachable after Task 16 is fixed, per the dependency note above.)
 
 | Component | Points |
 |---|---|
@@ -126,7 +128,7 @@ k -n fintech get hpa checkout-hpa
 k -n fintech get hpa checkout-hpa -o jsonpath='{.spec.behavior.scaleDown.stabilizationWindowSeconds}'
 ```
 
-Why: `autoscaling/v2` moved from a bare `targetCPUUtilizationPercentage` to the `metrics` list, and `behavior` is the only place scale velocity/stabilization is tunable.
+Why: `autoscaling/v2` moved from a bare `targetCPUUtilizationPercentage` to the `metrics` list, and `behavior` is the only place scale velocity/stabilization is tunable. Modern kubectl emits v2 from `k get hpa -o yaml`, so `k edit` lets you add `behavior` cleanly.
 
 | Component | Points |
 |---|---|
@@ -154,7 +156,7 @@ k -n commerce delete pod fetch $now
 cat /tmp/exam2/04-curl.txt                     # nginx welcome page HTML
 ```
 
-Why: empty Endpoints means selector mismatch; endpoints present but connection refused means wrong targetPort — this Service had both.
+Why: empty Endpoints means selector mismatch; endpoints present but connection refused means wrong targetPort — this Service had both. The temporary `fetch` pod is created *after* the fix, so if it stays Pending, Task 16 (scheduler) is still broken.
 
 | Component | Points |
 |---|---|
@@ -191,10 +193,10 @@ labels:
 k create ns prod-web
 k apply -k /tmp/exam2/kustomize/overlays/prod
 kubectl kustomize /tmp/exam2/kustomize/overlays/prod > /tmp/exam2/05-rendered.yaml
-k -n prod-web get deploy prod-web -o wide --show-labels   # 3 replicas, env=prod
+k -n prod-web get deploy prod-web -o wide --show-labels   # 3 desired, env=prod
 ```
 
-Why: overlays compose the base by reference (`resources: ../../base`), so the base stays untouched; `replicas:` and `labels:` are the current-kustomize transformers (the older `commonLabels:` also passes — it additionally mutates selectors, which is fine on first apply).
+Why: overlays compose the base by reference (`resources: ../../base`), so the base stays untouched; the `replicas:` transformer matches the resource by its **pre-prefix** name (`web`); `labels:` is the current-kustomize label transformer (the older `commonLabels:` also passes — it additionally mutates selectors, which is fine on a first apply). Pods only reach Ready once Task 16 is fixed; the object graded here is the Deployment spec.
 
 | Component | Points |
 |---|---|
@@ -256,7 +258,7 @@ docker exec -it cka-worker2 bash               # real exam: ssh node + sudo -i
 k get nodes                                    # Ready (allow ~30s)
 ```
 
-Why: NotReady with a dead kubelet is the highest-frequency node failure on the exam; `enable --now` both starts it and persists across reboot.
+Why: NotReady with a dead kubelet is the highest-frequency node failure on the exam; `enable --now` both starts it and persists across reboot. A blind `systemctl restart kubelet` scores lower — you are expected to confirm the diagnosis first.
 
 | Component | Points |
 |---|---|
@@ -311,10 +313,10 @@ spec:
 
 ```bash
 k get sc fast-local
-k -n storage-task get pvc,pod                  # Bound / Running
+k -n storage-task get pvc,pod                  # Bound / Running (after Task 16 is fixed)
 ```
 
-Why: with `WaitForFirstConsumer` the PVC intentionally sits `Pending` until the pod exists — do not "debug" that; provisioning is deferred so the volume lands on the pod's node.
+Why: with `WaitForFirstConsumer` the PVC intentionally sits `Pending` until a pod that uses it is **scheduled** — do not "debug" that binding delay. But note the compounding trap: the pod itself needs the scheduler (Task 16), and `WaitForFirstConsumer` means the PVC will not bind until the pod is scheduled. Both unblock together once the scheduler is up.
 
 | Component | Points |
 |---|---|
@@ -373,7 +375,7 @@ k -n gateway-ns get gateway,httproute
 k -n gateway-ns describe httproute shop-route
 ```
 
-Why: rule order matters — the `/cart` PathPrefix match must be its own rule; a rule with `backendRefs` and no `matches` defaults to `PathPrefix /`, catching everything else.
+Why: rule order matters — the `/cart` PathPrefix match must be its own rule; a rule with `backendRefs` and no `matches` defaults to `PathPrefix /`, catching everything else. A single rule listing both backends would load-balance across them rather than route by path.
 
 | Component | Points |
 |---|---|
@@ -406,11 +408,11 @@ description: Just below the highest user-defined class.
 k apply -f critical-services.yaml
 k -n fintech patch deploy payments \
   -p '{"spec":{"template":{"spec":{"priorityClassName":"critical-services"}}}}'
-k -n fintech rollout status deploy payments
+k -n fintech rollout status deploy payments    # completes only after Task 16 is fixed
 k -n fintech get pod -l app=payments -o jsonpath='{.items[0].spec.priority}'   # 499999
 ```
 
-Why: PriorityClass is cluster-scoped and immutable in `value`; the trap is counting the two `system-*` classes (2 billion range) as "highest" — the task, like the real 2025 exam item, means user-defined ones.
+Why: PriorityClass is cluster-scoped and immutable in `value`; the trap is counting the two `system-*` classes (2 billion range) as "highest" — the task, like the real 2025 exam item, means user-defined ones. The patch triggers a rollout whose new pods need the scheduler (Task 16).
 
 | Component | Points |
 |---|---|
@@ -438,7 +440,7 @@ docker cp cka-control-plane:/etc/kubernetes/pki/apiserver.crt /tmp/exam2/apiserv
 openssl x509 -in /tmp/exam2/apiserver.crt -noout -enddate | cut -d= -f2 > /tmp/exam2/11-expiry.txt
 ```
 
-Why: the apiserver serving cert lives at `/etc/kubernetes/pki/apiserver.crt` on kubeadm-style control planes; `kubeadm certs check-expiration` shows the whole PKI at once and is the faster tool when asked about several certs.
+Why: the apiserver serving cert lives at `/etc/kubernetes/pki/apiserver.crt` on kubeadm-style control planes; `kubeadm certs check-expiration` shows the whole PKI at once and is the faster tool when asked about several certs. Do not grab `apiserver-kubelet-client.crt` (that is the client cert to kubelets) or `ca.crt`.
 
 | Component | Points |
 |---|---|
@@ -451,7 +453,7 @@ Why: the apiserver serving cert lives at `/etc/kubernetes/pki/apiserver.crt` on 
 
 ```bash
 helm install web /tmp/exam2/charts/webapp -n web --create-namespace --set replicaCount=3
-k -n web get deploy web-webapp                 # 3/3 desired
+k -n web get deploy web-webapp                 # 3 desired (pods Ready after Task 16)
 
 helm upgrade web /tmp/exam2/charts/webapp -n web --reuse-values --set image.tag=1.27-alpine
 k -n web get deploy web-webapp -o jsonpath='{.spec.template.spec.containers[0].image}'
@@ -460,7 +462,7 @@ k -n web get deploy web-webapp -o jsonpath='{.spec.template.spec.containers[0].i
 helm history web -n web | tee /tmp/exam2/12-history.txt   # revisions 1 and 2
 ```
 
-Why: without `--reuse-values` (or repeating `--set replicaCount=3`) the upgrade would reset replicas to the chart default of 1 — the classic Helm upgrade trap.
+Why: without `--reuse-values` (or repeating `--set replicaCount=3`) the upgrade would reset replicas to the chart default of 1 — the classic Helm upgrade trap. Grading is on release/deployment state, so a `Pending` pod (scheduler down) does not cost points here.
 
 | Component | Points |
 |---|---|
@@ -514,7 +516,7 @@ k -n web-frontend run np-test --image=busybox:1.36 --restart=Never --rm -it \
   -- wget -qO- "http://$NODE_IP:30080"
 ```
 
-Why: Service ports strategic-merge-patch by `port` key, so the one-line patch pins the nodePort; the FQDN pattern is `<svc>.<ns>.svc.cluster.local`.
+Why: Service ports strategic-merge-patch by `port` key, so the one-line patch pins the nodePort; the FQDN pattern is `<svc>.<ns>.svc.cluster.local`. The `frontend` pod was scheduled before the scheduler fault, so its endpoint is live — but the throwaway `dns-test` pod needs the scheduler (Task 16) to run.
 
 | Component | Points |
 |---|---|
@@ -565,36 +567,47 @@ k -n storage-task get pvc archive-pvc          # Bound
 k -n storage-task exec archive-pod -- cat /mnt/archive/ts.txt
 ```
 
-Why: static binding matches on storageClassName + accessModes + capacity (request must be <= PV size); omitting `storageClassName: archive` would send the PVC to the cluster's default provisioner instead of this PV.
+Why: static binding matches on storageClassName + accessModes + capacity (request must be <= PV size); omitting `storageClassName: archive` would send the PVC to the cluster's default provisioner instead of this PV. The PVC binds immediately (the PV pre-exists and binding is not scheduler-gated), but `exec` only works once the pod is scheduled and Running (Task 16).
 
 | Component | Points |
 |---|---|
 | PVC matches class/mode/size, PV+PVC Bound | 3 |
 | Pod running with mount at /mnt/archive, file written | 2 |
 
-## Task 15 — RBAC for a ServiceAccount
+## Task 15 — Static Pod on the control plane
 
-**Domain:** Cluster Architecture (5%) | **Time budget:** 5 min
+**Domain:** Cluster Architecture (5%) | **Time budget:** 6 min
 
 ```bash
-k -n ci create role deploy-manager \
-  --verb=create,get,list,update,patch --resource=deployments
-k -n ci create rolebinding deploy-bot-binding \
-  --role=deploy-manager --serviceaccount=ci:deploy-bot
+docker exec -it cka-control-plane bash          # real exam: ssh <control-plane> + sudo -i
+  # confirm the static-pod dir if unsure:
+  grep staticPodPath /var/lib/kubelet/config.yaml   # /etc/kubernetes/manifests
+  cat > /etc/kubernetes/manifests/web-static.yaml <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-static
+  namespace: default
+spec:
+  containers:
+  - name: web
+    image: nginx:1.27-alpine
+    ports:
+    - containerPort: 80
+YAML
+  exit
 
-k auth can-i create deployments -n ci --as=system:serviceaccount:ci:deploy-bot   # yes
-k auth can-i delete deployments -n ci --as=system:serviceaccount:ci:deploy-bot   # no
-k auth can-i get secrets -n ci --as=system:serviceaccount:ci:deploy-bot          # no
-k auth can-i create deployments -n default --as=system:serviceaccount:ci:deploy-bot  # no
+k get pod -n default -o wide | grep web-static  # web-static-cka-control-plane   Running
+echo web-static-cka-control-plane > /tmp/exam2/15-staticpod.txt
 ```
 
-Why: a namespaced Role + RoleBinding cannot leak outside `ci`; the SA subject syntax in `can-i` is `system:serviceaccount:<ns>:<name>` — half the lost points on this task type are a malformed `--as`.
+Why: the kubelet watches `staticPodPath` and runs any manifest there directly, **bypassing the scheduler** — which is exactly why this task succeeds even while Task 16's scheduler is broken, and why it is worth doing early. The API server exposes a read-only *mirror* pod named `<pod-name>-<node-name>`; you cannot `kubectl apply`/`kubectl delete` it (the kubelet owns it) — delete the manifest file on the node to remove it. A candidate who runs `kubectl apply` instead of dropping the file gets no credit: that creates an ordinary API pod, not a static one, and it would stay `Pending` behind the broken scheduler.
 
 | Component | Points |
 |---|---|
-| Role with exactly the five verbs on deployments | 2 |
-| RoleBinding to the SA (correct subject) | 2 |
-| Verified allow and deny with can-i | 1 |
+| Manifest placed in the kubelet static-pod dir on cka-control-plane (not `kubectl apply`) | 2 |
+| Mirror pod `web-static-cka-control-plane` Running with image nginx:1.27-alpine | 2 |
+| Correct mirror-pod name written to /tmp/exam2/15-staticpod.txt | 1 |
 
 ## Task 16 — Pods stuck Pending cluster-wide
 
@@ -619,7 +632,7 @@ k -n recovery get pods                         # stuck-app schedules and runs
 echo /etc/kubernetes/manifests/kube-scheduler.yaml > /tmp/exam2/16-cause.txt
 ```
 
-Why: static pod manifests under `/etc/kubernetes/manifests/` are watched by the kubelet — editing the file in place *is* the permanent fix; restarting anything manually is unnecessary and `kubectl delete` on a mirror pod does nothing.
+Why: static pod manifests under `/etc/kubernetes/manifests/` are watched by the kubelet — editing the file in place *is* the permanent fix; restarting anything manually is unnecessary and `kubectl delete` on a mirror pod does nothing. Fix this early: it unblocks Tasks 2 (rollout), 8, 10, 12 and 14.
 
 | Component | Points |
 |---|---|
@@ -647,23 +660,24 @@ Why: static pod manifests under `/etc/kubernetes/manifests/` are watched by the 
 | 12 | Helm release lifecycle | Cluster Architecture | 5 | |
 | 13 | NodePort Service and DNS | Services & Networking | 6 | |
 | 14 | Bind a pre-provisioned PV | Storage | 5 | |
-| 15 | RBAC for a ServiceAccount | Cluster Architecture | 5 | |
+| 15 | Static Pod on the control plane | Cluster Architecture | 5 | |
 | 16 | Pods stuck Pending cluster-wide | Troubleshooting | 7 | |
 | | **Total** | | **100** | |
 
 Domain subtotals: Troubleshooting 30, Cluster Architecture 25, Services & Networking 20, Workloads & Scheduling 15, Storage 10.
 
-**Pass: >= 66.** Below 60: redo the failed domains' course modules before the next mock. 60–75: re-run this exam's failed tasks cold in 3 days. Above 85 within time: you are at exam readiness for this difficulty band.
+**Pass: >= 66.** Below 60: redo the failed domains' course modules before the next mock. 60–75: re-run this exam's failed tasks cold in 3 days. Above 85 within time: you are at exam readiness for this difficulty band. If you scored well but blew the 120-minute budget, that is a *fail* on the real exam — re-run and treat the clock as the hard constraint it is.
 
 Cleanup after grading:
 
 ```bash
 kubectl delete ns troubled commerce fintech secure-api web-frontend gateway-ns \
-  storage-task ci dev-ana recovery web prod-web --ignore-not-found
+  storage-task dev-ana recovery web prod-web --ignore-not-found
 kubectl delete pv pv-archive --ignore-not-found
 kubectl delete priorityclass preexisting-high critical-services --ignore-not-found
 kubectl delete storageclass fast-local --ignore-not-found
 kubectl delete csr ana --ignore-not-found
 kubectl config delete-context ana 2>/dev/null; kubectl config delete-user ana 2>/dev/null
+docker exec cka-control-plane rm -f /etc/kubernetes/manifests/web-static.yaml 2>/dev/null || true
 rm -rf /tmp/exam2
 ```

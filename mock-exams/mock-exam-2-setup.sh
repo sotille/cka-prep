@@ -21,10 +21,13 @@ kubectl config use-context "$CTX" >/dev/null 2>&1 || { echo "FATAL: kubectl cont
 kubectl get nodes >/dev/null || { echo "FATAL: cluster unreachable via context $CTX" >&2; exit 1; }
 command -v helm >/dev/null 2>&1 || echo "WARN: helm not found on PATH - Task 12 requires it (brew install helm)" >&2
 
+echo ">>> Resetting any state left by a previous run"
 # If a previous run stopped kubelet on worker2, bring it back so setup pods can settle.
 docker exec "$W2" systemctl start kubelet >/dev/null 2>&1 || true
 # If a previous run broke the scheduler, restore it for the same reason.
-docker exec "$CP" sed -i 's|- kube-schedulerX$|- kube-scheduler|' /etc/kubernetes/manifests/kube-scheduler.yaml || true
+docker exec "$CP" sed -i 's|- kube-schedulerX$|- kube-scheduler|' /etc/kubernetes/manifests/kube-scheduler.yaml 2>/dev/null || true
+# Remove a static pod the candidate may have created for Task 15 (resets the answer).
+docker exec "$CP" rm -f /etc/kubernetes/manifests/web-static.yaml 2>/dev/null || true
 sleep 5
 
 echo ">>> Workspace /tmp/exam2"
@@ -33,11 +36,11 @@ mkdir -p /tmp/exam2/kustomize/base
 mkdir -p /tmp/exam2/charts/webapp/templates
 
 echo ">>> Namespaces"
-for ns in troubled commerce fintech secure-api web-frontend gateway-ns storage-task ci dev-ana recovery; do
+for ns in troubled commerce fintech secure-api web-frontend gateway-ns storage-task dev-ana recovery; do
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 done
 
-echo ">>> Task 2 fixtures (broken deployment)"
+echo ">>> Task 2 fixtures (broken deployment: bad image tag + wrong readiness port)"
 kubectl apply -f - <<'EOF' >/dev/null
 apiVersion: apps/v1
 kind: Deployment
@@ -71,7 +74,7 @@ spec:
           periodSeconds: 5
 EOF
 
-echo ">>> Task 4 fixtures (deployment + misconfigured service)"
+echo ">>> Task 4 fixtures (deployment + misconfigured service: wrong selector + wrong targetPort)"
 kubectl apply -f - <<'EOF' >/dev/null
 apiVersion: apps/v1
 kind: Deployment
@@ -112,7 +115,7 @@ spec:
     protocol: TCP
 EOF
 
-echo ">>> Task 3 / Task 10 fixtures (fintech workloads, preexisting PriorityClass)"
+echo ">>> Task 3 / Task 10 fixtures (fintech workloads, preexisting user-defined PriorityClass)"
 kubectl apply -f - <<'EOF' >/dev/null
 apiVersion: apps/v1
 kind: Deployment
@@ -393,9 +396,6 @@ spec:
     type: DirectoryOrCreate
 EOF
 
-echo ">>> Task 7 fixtures (ServiceAccount)"
-kubectl -n ci create serviceaccount deploy-bot --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-
 echo ">>> Task 5 fixtures (kustomize base)"
 cat > /tmp/exam2/kustomize/base/deployment.yaml <<'EOF'
 apiVersion: apps/v1
@@ -464,16 +464,16 @@ spec:
         - containerPort: 80
 EOF
 
-echo ">>> Waiting for baseline pods to be scheduled"
+echo ">>> Waiting for baseline pods to be scheduled (before the scheduler fault is injected)"
 for ns in troubled commerce fintech secure-api web-frontend gateway-ns; do
   kubectl -n "$ns" wait --for=condition=PodScheduled pod --all --timeout=90s >/dev/null 2>&1 || true
 done
 
-echo ">>> Injecting fault: control plane component (Task 16)"
+echo ">>> Injecting fault: control-plane scheduler (Task 16)"
 docker exec "$CP" sed -i 's|- kube-scheduler$|- kube-schedulerX|' /etc/kubernetes/manifests/kube-scheduler.yaml
 sleep 8
 
-echo ">>> Task 16 fixtures (workload affected by the fault)"
+echo ">>> Task 16 fixtures (workload that cannot schedule while the scheduler is down)"
 kubectl apply -f - <<'EOF' >/dev/null
 apiVersion: apps/v1
 kind: Deployment
@@ -497,7 +497,7 @@ spec:
         image: nginx:1.27-alpine
 EOF
 
-echo ">>> Injecting fault: node (Task 7)"
+echo ">>> Injecting fault: node kubelet down (Task 7)"
 docker exec "$W2" systemctl stop kubelet
 
 echo ""

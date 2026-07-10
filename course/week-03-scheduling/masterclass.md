@@ -1,691 +1,638 @@
-# Week 03 — Scheduling: Every Mechanism That Decides Pod → Node (Workloads & Scheduling 15% · Troubleshooting 30% · Cluster Architecture 25%)
+# Week 03 Masterclass — Scheduling (Workloads & Scheduling 15% · a large slice of Troubleshooting 30% when the symptom is "Pending" · cordon/drain and static pods graded under Cluster Architecture 25%)
 
-Scheduling looks like a 15% topic on the curriculum, but that undersells it three ways. First, "why is this pod Pending?" is the single most common troubleshooting task pattern, and Troubleshooting is 30% of the exam. Second, `drain`/`cordon` and static pods are graded under Cluster Architecture (25%) because they are prerequisites for node maintenance and kubeadm upgrades. Third, scheduling primitives leak into every other module: a NetworkPolicy task that pre-places pods with affinity, a storage task where a PV's node affinity blocks scheduling. Master the mechanics here and you buy back time everywhere else.
-
-Version note: everything below is stable behavior on any exam-current Kubernetes (v1.30+). Where a field is newer or renamed, it is flagged inline. Check the live exam version at github.com/cncf/curriculum before exam day.
+Scheduling is a small explicit slice of the blueprint (part of Workloads & Scheduling, 15%) but it is over-represented in what actually costs points, because a pod that will not leave `Pending` is a scheduling problem wearing a troubleshooting costume, and troubleshooting is 30%. `drain`/`cordon` and static pods are graded under Cluster Architecture (25%) as prerequisites for node maintenance and kubeadm upgrades. Master the pipeline once and both the "make this pod land on that node" build tasks and the "why won't this schedule" forensic tasks collapse into the same mental model: filter, score, bind — then read the events. This module covers the scheduler internals, every placement primitive (`nodeName`, `nodeSelector`, node/pod affinity, taints/tolerations, topology spread), disruption control (cordon/drain/PDB), static pods, PriorityClass/preemption, and multi-scheduler awareness. Behavior noted as version-dependent should be re-checked against the current exam Kubernetes version on the CNCF curriculum page.
 
 ---
 
 ## What the exam actually asks
 
-| Task pattern (exam voice) | Domain | What is really being tested |
-|---|---|---|
-| "Schedule a pod to the node labeled X" | Workloads & Scheduling (15%) | nodeSelector / node affinity YAML under time pressure |
-| "Ensure no two replicas run on the same node" | Workloads & Scheduling | pod anti-affinity or topology spread, topologyKey semantics |
-| "Taint node X so only pods with Y run there" | Workloads & Scheduling | taint syntax + toleration matching rules |
-| "Pod Z is Pending. Find the cause and fix it" | Troubleshooting (30%) | reading `FailedScheduling` events, mapping message → mechanism |
-| "Mark node X unschedulable and move workloads off it" | Cluster Architecture (25%) | cordon vs drain, drain flags, PDB interference |
-| "Create a static pod on node X" / "the control plane is broken" | Cluster Architecture / Troubleshooting | staticPodPath, mirror pods, editing manifests on the node filesystem |
-| "Create a PriorityClass and a pod that uses it" | Workloads & Scheduling | PriorityClass object + `priorityClassName`, preemption awareness |
+| Topic | Domain | Weight | Typical task phrasing |
+|---|---|---|---|
+| Place a pod on a specific node | Workloads & Scheduling | 15% | "Schedule pod `X` only on nodes labelled `disk=ssd`" |
+| Node affinity (required/preferred) | Workloads & Scheduling | 15% | "Pod must run on a node in zone `a`, prefer nodes with `gpu=true`" |
+| Pod (anti-)affinity, topology spread | Workloads & Scheduling | 15% | "Spread the 6 replicas evenly across nodes; never two on one node" |
+| Taints & tolerations | Workloads & Scheduling | 15% | "Taint the node so only workload `X` schedules there" |
+| Cordon / drain a node | Cluster Architecture / Troubleshooting | 25% / 30% | "Drain `node2` for maintenance without deleting daemonset pods" |
+| Static pods | Cluster Architecture | 25% | "Create a static pod `web` on `node2`" |
+| PriorityClass & preemption | Workloads & Scheduling | 15% | "Create a high-priority class; ensure critical pods evict others" |
+| Diagnose a `Pending` pod | Troubleshooting | 30% | "Pod `X` is Pending. Make it run." |
 
-The direct tasks are cheap points if you can produce affinity/toleration YAML in under 3 minutes. The Pending-forensics tasks are where prepared candidates separate from unprepared ones: the event message tells you the exact cause if you know how to read it.
+Expect at least one explicit affinity/taint build task, at least one drain task (often bundled with kubeadm upgrade in the 25% domain), and one or two `Pending`-forensics tasks where the fix is a one-line label, toleration, or request change. The build tasks reward YAML speed; the forensic tasks reward reading `kubectl describe` events fast and knowing which message means what.
+
+Version note: everything below is stable behavior on any exam-current Kubernetes (v1.30+). Where a field is newer or renamed it is flagged inline. Confirm the live exam version at github.com/cncf/curriculum before exam day.
 
 ---
 
-## The scheduling pipeline: from `kubectl apply` to Running
+## The scheduler pipeline: what happens between Pending and Running
 
-kube-scheduler is a control loop that does one thing: for each pod with empty `spec.nodeName`, pick a node and write it. Everything else — affinity, taints, spread, priority — is configuration consumed by that loop.
+`kube-scheduler` is a control-loop that watches for pods with an empty `.spec.nodeName` **and** a `.spec.schedulerName` it owns (default `default-scheduler`). For each such pod it runs one **scheduling cycle** (synchronous, one pod at a time) followed by an asynchronous **binding cycle**. Everything you configure in this module is a knob on one of these extension points.
 
-### The queue
+```
+                    ┌─────────────── scheduling queue ───────────────┐
+   new Pod ───────► │ activeQ (heap: priority, then arrival time)     │
+   cluster event ─► │ backoffQ (failed recently, exp. backoff)        │
+                    │ unschedulableQ (couldn't fit; waits for events) │
+                    └───────────────────────┬────────────────────────┘
+                                             │ pop head
+                       SCHEDULING CYCLE (sync, per pod)
+   PreFilter ─► Filter ─► PostFilter ─► PreScore ─► Score ─► Reserve ─► Permit
+   (feasibility)  │        (preempt if     (rank feasible nodes)   (assume)
+                  │         no node fit)
+                  ▼
+        feasible nodes = 0 ──► FailedScheduling event, pod → unschedulableQ
+                       BINDING CYCLE (async)
+                    PreBind ─► Bind ─► PostBind
+                    (write .spec.nodeName via /binding subresource)
+```
 
-Newly created pods land in the scheduler's **active queue** (activeQ), a priority queue ordered by pod priority (higher first), then FIFO within equal priority. The scheduler pops **one pod at a time** and runs a scheduling cycle for it. Two more internal structures matter for diagnosis:
+The scheduling **queue** has three parts and understanding them explains flaky-looking behavior. `activeQ` is a heap ordered by pod priority, then arrival time — this is why a `PriorityClass` changes *which pod is tried first*. A pod that fails scheduling drops to `backoffQ` and is retried with exponential backoff, then parks in `unschedulableQ`. Crucially, a pod in `unschedulableQ` is **not** retried on a timer — it is re-queued when a relevant **cluster event** fires (a node is added, a pod is deleted, a node label changes). So "I freed up CPU and the Pending pod scheduled instantly" is the queue reacting to the delete event, not a poll.
 
-- **backoffQ** — pods that failed scheduling recently wait here with exponential backoff (1s initial, 10s cap by default) before re-entering activeQ.
-- **unschedulable pool** — pods that failed with no viable node park here. They are moved back to activeQ when a relevant cluster event occurs (node added, node label changed, taint removed, pod deleted freeing resources) or after a periodic flush (every 5 minutes by default).
+The two words the old docs used still appear in exam-legal docs and events:
 
-Practical consequence: when you fix the cause of a Pending pod (label the node, remove the taint, free resources), the pod schedules within seconds — you never need to recreate it. If it does not, your fix did not actually address the failed predicate.
+- **Predicates → Filter plugins.** Boolean feasibility. A node either survives or is eliminated. Key filters: `NodeResourcesFit` (do the pod's **requests** fit in allocatable?), `NodeAffinity` (nodeSelector + required node affinity), `NodeName`, `TaintToleration`, `PodTopologySpread` (DoNotSchedule constraints), `InterPodAffinity`, `NodePorts`, `NodeUnschedulable` (cordon), `VolumeBinding` (PV zone/topology).
+- **Priorities → Score plugins.** Each surviving node gets 0–100 per plugin; the weighted sum picks the winner (ties broken randomly). Key scorers: `NodeResourcesFit` (default `LeastAllocated` → spread load across nodes), `ImageLocality` (node already has the image), `InterPodAffinity`, `PodTopologySpread` (ScheduleAnyway), `TaintToleration`, `NodeAffinity` (preferred terms).
 
-### The scheduling cycle: filter, score, bind
+**Bind** writes `.spec.nodeName` through the pod's `/binding` subresource. Only then does the kubelet on that node see the pod (kubelets watch pods filtered by `nodeName`) and start pulling images. The scheduler sets the `PodScheduled` condition to `True` at bind time — so `PodScheduled=False` is the machine-readable "the scheduler could not place this".
 
-The scheduling framework runs plugins in phases. The old terminology (predicates/priorities) still appears in docs and event messages; map it once:
+### Pending forensics — read the condition, then the event
 
-| Phase | Old name | What happens | Key default plugins |
-|---|---|---|---|
-| PreFilter | — | precompute state, fail fast (e.g. sum pod requests) | NodeResourcesFit, InterPodAffinity, PodTopologySpread |
-| **Filter** | **predicates** | eliminate nodes that *cannot* run the pod | NodeUnschedulable, TaintToleration, NodeAffinity, NodeName, NodeResourcesFit, NodePorts, VolumeBinding, InterPodAffinity, PodTopologySpread |
-| PostFilter | — | runs **only if 0 nodes survive** → preemption attempt | DefaultPreemption |
-| **Score** | **priorities** | rank surviving nodes 0–100, weighted sum | NodeResourcesFit (least-allocated), ImageLocality, InterPodAffinity, NodeAffinity (preferred terms), TaintToleration (PreferNoSchedule), PodTopologySpread |
-| Reserve/Permit | — | in-memory reservation before the API write | VolumeBinding |
-| **Bind** | — | POST to the pod's `binding` subresource, sets `spec.nodeName` | DefaultBinder |
-
-Two details worth knowing at a senior level:
-
-1. **Scoring is sampled on big clusters.** `percentageOfNodesToScore` limits how many feasible nodes get scored (adaptive default, floor 5%). Irrelevant on a 3-node kind cluster, but it explains why "best" placement is best-effort at scale.
-2. **The kubelet re-checks admission.** Binding is the scheduler's opinion; the kubelet has the last word. On admission it re-validates resources and node affinity. A pod that slips past (or bypasses) the scheduler can be rejected by the kubelet with terminal statuses like `OutOfcpu`, `OutOfmemory`, or `NodeAffinity`. It does **not** re-check `NoSchedule` taints — which is exactly why static pods run on tainted control-plane nodes.
-
-After bind, `status.conditions` gets `PodScheduled: True` and the kubelet takes over (image pull, container start — different failure domain, covered in week 9).
-
-One-liner for completeness: `spec.schedulingGates` (stable in v1.30) can hold a pod out of the queue entirely — a pod Pending with a `SchedulingGated` reason is waiting for a controller to remove its gate, not failing predicates.
-
-### Pending forensics: reading the corpse
-
-The triage macro, in order:
+Two questions answer almost every "why is it Pending" task:
 
 ```bash
-k describe po -n team-a broken-pod          # Events section at the bottom
-k get events -n team-a --sort-by=.lastTimestamp | tail -20
-k get po -n team-a broken-pod -o jsonpath='{.status.conditions}'
+k describe pod <p> | sed -n '/Conditions:/,/Events:/p'   # is PodScheduled False?
+k describe pod <p> | sed -n '/Events:/,$p'               # what did FailedScheduling say?
+k get events --field-selector involvedObject.name=<p> --sort-by=.lastTimestamp
 ```
 
-A scheduling failure event looks like this (message anatomy is the whole game):
+The `FailedScheduling` message is a compact tally: `0/3 nodes are available: 1 node(s) had untolerated taint {node-role.kubernetes.io/control-plane: }, 2 Insufficient cpu.` Learn to decode it:
 
-```text
-Warning  FailedScheduling  default-scheduler
-0/3 nodes are available: 1 node(s) had untolerated taint {node-role.kubernetes.io/control-plane: },
-1 Insufficient cpu, 1 node(s) didn't match Pod's node affinity/selector.
-preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.
-```
-
-Read it as an accounting identity: the counts sum to the node total, and each fragment names the Filter plugin that rejected that group of nodes. The trailing `preemption:` clause (v1.24+) reports why preemption could not help either.
-
-| Message fragment | Failing mechanism | Fix direction |
+| Event fragment | Root cause | One-line fix |
 |---|---|---|
-| `had untolerated taint {key: value}` | TaintToleration | add toleration to pod, or remove taint from node |
-| `Insufficient cpu` / `Insufficient memory` | NodeResourcesFit | lower `requests`, free capacity, or add nodes |
-| `didn't match Pod's node affinity/selector` | NodeAffinity | fix label/expression mismatch (label the node is usually fastest) |
-| `didn't match pod affinity rules` / `didn't match pod anti-affinity rules` | InterPodAffinity | no matching peer pod exists / co-location forbidden everywhere |
-| `didn't satisfy existing pods anti-affinity rules` | InterPodAffinity (symmetry) | an *existing* pod's anti-affinity blocks this one |
-| `node(s) were unschedulable` | NodeUnschedulable | node is cordoned — `k uncordon` |
-| `didn't match pod topology spread constraints` | PodTopologySpread | skew would exceed maxSkew everywhere placeable |
-| `had volume node affinity conflict` | VolumeBinding | PV pinned to another node (week 7) |
-| `No preemption victims found` | DefaultPreemption | nothing lower-priority to evict |
-| **No events at all**, pod Pending | no scheduler picked it up | `spec.schedulerName` names a scheduler that doesn't exist, or the scheduler is down (check `kube-system`) |
+| `didn't match Pod's node affinity/selector` | `nodeSelector` / required node affinity matches no node | fix label on node or selector on pod |
+| `had untolerated taint {k: v}` | node tainted, pod lacks toleration | add toleration (or remove taint) |
+| `Insufficient cpu` / `Insufficient memory` | pod **requests** exceed free allocatable everywhere | lower requests or free/add capacity |
+| `node(s) didn't match pod topology spread constraints` | `DoNotSchedule` spread can't be satisfied | relax `maxSkew`/`whenUnsatisfiable`, add a domain |
+| `node(s) didn't satisfy existing pods anti-affinity rules` | pod anti-affinity of *already-running* pods excludes this node | scale domains or relax anti-affinity |
+| `node(s) had volume node affinity conflict` | PV is pinned to a zone/node the pod can't use | match pod placement to PV, or use WaitForFirstConsumer SC |
+| `pod has unbound immediate PersistentVolumeClaims` | PVC not bound yet | provision/bind the PVC |
+| `too many pods` | node hit `maxPods` (kubelet, default 110) | different node / raise maxPods |
+| **No `FailedScheduling` event at all, still Pending** | no scheduler owns it (wrong `schedulerName`) **or** `nodeName` set to a missing/NotReady node | fix `schedulerName`; check `nodeName` target |
 
-Also check `status.nominatedNodeName`: if set, preemption fired and the pod is waiting for victims to finish terminating on that node.
-
----
-
-## The placement toolbox: one table to orient every task
-
-| Mechanism | Declared on | Direction | One-line semantics |
-|---|---|---|---|
-| `nodeName` | pod | hard assignment | bypasses the scheduler entirely |
-| `nodeSelector` | pod | attract (hard) | node must carry all listed labels |
-| node affinity | pod | attract (hard or soft) | expressive label matching against nodes |
-| pod affinity / anti-affinity | pod | attract/repel relative to *pods* | "near/away from pods matching X", per topology domain |
-| taints + tolerations | node + pod | repel | node repels all pods that don't tolerate |
-| topology spread | pod | distribute | bound the pod-count skew across domains |
-| PriorityClass / preemption | pod | arbitrate scarcity | who waits, who evicts whom |
-
-The classic 30-second interview answer the notes ask for: **nodeSelector/affinity are pod-side attraction** ("I must run where..."), **taints are node-side repulsion** ("nobody runs here unless..."), and they compose — a *dedicated* node needs both, because a taint keeps others out but does nothing to pull your pods in.
+That last row is the sharpest trap and the fastest tell: if a pod is Pending with **zero** scheduler events, no scheduler ever looked at it. Either `.spec.schedulerName` names a scheduler that isn't running, or `.spec.nodeName` was set directly (bypassing the scheduler) to a node that can't or won't run it. Check both fields: `k get pod <p> -o yaml | grep -E 'schedulerName|nodeName'`.
 
 ---
 
-## nodeName: the scheduler bypass
+## Direct assignment vs selection: `nodeName`, `nodeSelector`
+
+### `nodeName` — the scheduler bypass
+
+Set `.spec.nodeName` and the scheduler is out of the loop entirely. No filtering, no scoring, no `TaintToleration`, no `NodeResourcesFit`. The kubelet on the named node simply notices the pod and runs it. Consequences you must internalize:
+
+- **Taints are ignored.** A pod with `nodeName: cka-control-plane` lands on the control plane despite its `NoSchedule` taint, because the taint is enforced by a *filter plugin* and you skipped the filters.
+- **The scheduler's resource filter is skipped — but the kubelet re-checks fit.** No `NodeResourcesFit` runs, so the scheduler never vets capacity. The kubelet's own admission on the target node, however, still evaluates requests: a `nodeName` pod whose requests exceed the node's allocatable is **rejected at admission** and goes `Failed` with reason `OutOfcpu`/`OutOfmemory` (it never runs). A pod with no/small requests (the common case, and all the exercise pods here) always lands; only then can it be OOM-killed or evicted later. Taints are truly ignored; resource fit is not — the kubelet re-checks it.
+- **A wrong name = silent Pending.** `nodeName: doesnotexist` leaves the pod Pending forever with no event, because no kubelet is watching for that name and no scheduler is involved.
+
+It is the single fastest way to force placement in the exam when you *know* the node name and don't care about safety — but reach for it knowing it silences every guardrail.
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: direct
+  name: pin-by-name
 spec:
   nodeName: cka-worker
   containers:
-  - name: app
-    image: nginx:1.27
+    - name: c
+      image: nginx:1.27
 ```
 
-Setting `spec.nodeName` at creation means the scheduler never sees the pod (its watch filters on empty nodeName). Consequences you must be able to reason about:
+### `nodeSelector` — the simplest selection
 
-- **No Filter phase runs.** `NoSchedule` and `PreferNoSchedule` taints are ignored; cordon (`unschedulable: true`) is ignored; affinity conflicts are ignored by the scheduler — the pod goes straight to the kubelet.
-- **The kubelet still has admission.** Insufficient resources → terminal `OutOfcpu`/`OutOfmemory` status (not Pending — the pod *failed*). Node affinity mismatch → `NodeAffinity` rejection.
-- **NoExecute still applies.** The taint manager (in kube-controller-manager) evicts running pods regardless of how they got there.
-- **Nonexistent node** → the pod sits Pending forever with no events: no kubelet claims it, no scheduler owns it. Same symptom signature as a bad `schedulerName`.
-- The field is **immutable** on an existing pod, and it is exactly how the scheduler itself "assigns" pods (via the binding subresource).
-
-Exam relevance: rarely asked directly, but it is the mechanism behind static pods and DaemonSet-style pinning, and it is a fast way to force placement in your lab. Know it as a diagnostic fact: a pod that "skipped the queue" onto a tainted node almost certainly had nodeName set.
-
-## nodeSelector: the 90% tool
+A flat map; **every** key/value must equal a node label (ANDed). Missing any → `didn't match Pod's node affinity/selector` and Pending. This is the fastest *scheduler-respecting* placement, and `kubectl label node` + `nodeSelector` is often the intended two-command answer.
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: fast
+  name: pin-by-label
 spec:
   nodeSelector:
     disktype: ssd
   containers:
-  - name: app
-    image: nginx:1.27
+    - name: c
+      image: nginx:1.27
 ```
-
-All listed labels must be present on the node with exact values (pure AND, equality only). If the exam task is "run this pod on the node labeled `disktype=ssd`", this is the answer — do not write affinity YAML when two lines of nodeSelector satisfy the requirement. Label management one-liners:
 
 ```bash
-k get nodes --show-labels
-k label node cka-worker disktype=ssd
-k label node cka-worker disktype=nvme --overwrite
-k label node cka-worker disktype-          # remove
+k label node cka-worker disktype=ssd          # make it match
+k label node cka-worker disktype-             # remove the label (trailing dash)
 ```
 
-Every node already carries `kubernetes.io/hostname=<nodename>` — the built-in way to pin to a named node *through* the scheduler (unlike nodeName, taints and resources are still respected).
+`nodeSelector` has no operators, no OR, no soft mode. The moment the task says "prefer", "or", "not", or "greater than", you need node affinity.
 
-## Node affinity: expressive nodeSelector
+---
+
+## Node affinity: expressive placement
+
+Node affinity lives under `.spec.affinity.nodeAffinity` and has two clauses whose long names encode a promise: the `IgnoredDuringExecution` suffix means once the pod is scheduled, later changes to node labels will **not** evict it. There is no `RequiredDuringExecution` today.
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: affine
+  name: affinity-demo
 spec:
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
-        - matchExpressions:
-          - key: disktype
-            operator: In
-            values:
-            - ssd
-            - nvme
+          - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values: ["zone-a", "zone-b"]
+              - key: disktype
+                operator: In
+                values: ["ssd"]
       preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 80
-        preference:
-          matchExpressions:
-          - key: topology.kubernetes.io/zone
-            operator: In
-            values:
-            - eu-west-1a
+        - weight: 50
+          preference:
+            matchExpressions:
+              - key: cpu-tier
+                operator: In
+                values: ["high"]
   containers:
-  - name: app
-    image: nginx:1.27
+    - name: c
+      image: nginx:1.27
 ```
 
-**Required vs preferred.** `requiredDuringSchedulingIgnoredDuringExecution` is a Filter: no matching node → Pending. `preferredDuringSchedulingIgnoredDuringExecution` is a Score: each entry has `weight` 1–100 added to matching nodes' scores; the pod lands elsewhere without complaint if no node matches. A "preferred" pod on the "wrong" node is *not* a bug — a trap the exam exploits in troubleshooting scenarios.
+### The one semantic that trips everyone: AND vs OR
 
-**IgnoredDuringExecution** means the rule is evaluated once, at scheduling. Remove the label from the node afterward and the pod keeps running. (Contrast: `NoExecute` taints, the only placement mechanism that acts on *running* pods. `requiredDuringSchedulingRequiredDuringExecution` still does not exist.)
+- `nodeSelectorTerms` is a **list**, and the terms are **ORed**. A node satisfies the required rule if it matches *any one* term.
+- Inside a single term, `matchExpressions` (and `matchFields`) are **ANDed**. The node must match *every* expression in that term.
 
-**The AND/OR structure — the most-fumbled detail in this topic:**
-
-- Multiple `nodeSelectorTerms` entries are **ORed** — any one term matching a node is enough.
-- Multiple `matchExpressions` inside one term are **ANDed** — all must match.
-- If both `nodeSelector` and `nodeAffinity.required...` are present, **both** must be satisfied (ANDed).
+So "zone-a **and** ssd" is one term with two expressions (as above). "zone-a **or** ssd" is two terms each with one expression:
 
 ```yaml
-# reads: (gpu exists) OR (disktype=ssd AND env!=dev)
 apiVersion: v1
 kind: Pod
 metadata:
-  name: or-demo
+  name: affinity-or
 spec:
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
-        - matchExpressions:
-          - key: gpu
-            operator: Exists
-        - matchExpressions:
-          - key: disktype
-            operator: In
-            values:
-            - ssd
-          - key: env
-            operator: NotIn
-            values:
-            - dev
+          - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values: ["zone-a"]
+          - matchExpressions:
+              - key: disktype
+                operator: In
+                values: ["ssd"]
   containers:
-  - name: app
-    image: nginx:1.27
+    - name: c
+      image: nginx:1.27
 ```
 
-**Operators:**
+Getting this backwards is the classic "my affinity is too strict / too loose" bug. **Terms = OR, expressions = AND.**
 
-| Operator | Matches when | Notes |
+### Operators
+
+| Operator | Meaning | Notes |
 |---|---|---|
-| `In` | label value in `values` list | the workhorse |
-| `NotIn` | label absent **or** value not in list | doubles as anti-affinity to nodes |
-| `Exists` | label key present | `values` must be empty |
-| `DoesNotExist` | label key absent | `values` must be empty |
-| `Gt` / `Lt` | label value parses as integer and compares | exactly one value, written as a **string**: `values: ["8"]` |
+| `In` | label value is in the set | the workhorse |
+| `NotIn` | value not in the set (or key absent) | node *anti-affinity*; a node that **lacks the key entirely also matches** (a missing label satisfies `NotIn`) |
+| `Exists` | label key present (any value) | `values` must be omitted/empty |
+| `DoesNotExist` | label key absent | anti-affinity by absence; `values` empty |
+| `Gt` / `Lt` | value greater/less than | single integer in `values`; label value compared numerically |
 
-`NotIn`/`DoesNotExist` on node labels is how you express node *anti*-affinity — there is no `nodeAntiAffinity` field.
+`Gt`/`Lt` take exactly one value and compare as integers — handy for "kernel version greater than N" style tasks. `preferredDuring...` entries each carry a `weight` (1–100) that adds to the node's score; they never make a node infeasible. `matchFields` (instead of `matchExpressions`) matches against pod-facing node *fields* rather than labels — rarely needed on the exam; `matchExpressions` is what you reach for.
 
-## Pod affinity and anti-affinity: placement relative to pods
+---
 
-Node affinity asks "what is on the node's labels?"; pod affinity asks "what pods are already running there?" That makes it strictly more expensive: the scheduler must scan pods across the cluster for every candidate node. The docs carry an explicit warning — required pod (anti-)affinity is not recommended beyond several-hundred-node clusters. Irrelevant on kind, but say it in a design review.
+## Pod affinity / anti-affinity: placement relative to other pods
+
+Where node affinity talks about node labels, pod affinity talks about *other pods*, evaluated within a **topology domain** you name with `topologyKey`. The `topologyKey` is a node label; all nodes sharing the same value for that label form one domain.
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Pod
 metadata:
   name: cache
+  labels:
+    app: cache
 spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: cache
-  template:
-    metadata:
-      labels:
-        app: cache
-    spec:
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchLabels:
-                app: cache
-            topologyKey: kubernetes.io/hostname
-        podAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchLabels:
-                  app: web
-              topologyKey: kubernetes.io/hostname
-      containers:
-      - name: redis
-        image: redis:7
+  affinity:
+    podAffinity:                 # schedule NEAR pods matching the selector...
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: web
+          topologyKey: topology.kubernetes.io/zone   # ...in the same zone
+    podAntiAffinity:             # ...but never TWO caches on the same node
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: cache
+          topologyKey: kubernetes.io/hostname
+  containers:
+    - name: c
+      image: redis:7
 ```
 
-This is the canonical exam pattern: "no two cache replicas on the same node, prefer to co-locate with web." Note the structural asymmetry: required terms hold `labelSelector`+`topologyKey` directly; preferred terms wrap them in `podAffinityTerm` under a `weight`.
+Read it as: "place me on a node whose **zone** already runs an `app=web` pod, and whose **host** does not already run an `app=cache` pod." `topologyKey: kubernetes.io/hostname` means "per node" (the classic one-per-node spread). `topologyKey: topology.kubernetes.io/zone` means "per zone".
 
-**topologyKey, explained properly.** The rule is *not* "same node" or "different node" — it is "same/different **topology domain**", where a domain is the set of nodes sharing a value for the `topologyKey` label:
+- `requiredDuring...` is a list of terms, **ANDed** (all must hold). Each term has a `labelSelector` and a mandatory `topologyKey`.
+- `preferredDuring...` entries carry `weight` and a nested `podAffinityTerm`.
+- Scope defaults to the pod's own namespace; widen with `namespaces:` (explicit list) or `namespaceSelector:`.
 
-- `topologyKey: kubernetes.io/hostname` → every node is its own domain → "same/different node".
-- `topologyKey: topology.kubernetes.io/zone` → all nodes in a zone form one domain → anti-affinity means "different *zone*", so two replicas on different nodes in the *same* zone still violate it.
+**Cost warning — this is in the docs and worth an exam remark.** Inter-pod affinity/anti-affinity is evaluated against every candidate pod on every candidate node; the docs explicitly warn it "requires substantial amounts of processing which can slow down scheduling significantly in large clusters" and advise against it above a few hundred nodes. For pure even-spreading, `topologySpreadConstraints` (below) is cheaper and more precise — prefer it unless the task literally says "near pod X".
 
-Mechanics: for affinity, a node passes if it is in a domain containing a pod matching `labelSelector`; for anti-affinity, a node fails if its domain contains a matching pod. A node **missing the topologyKey label entirely** can never satisfy pod affinity — on clusters without zone labels (like kind), a zone-based rule makes every pod Pending. `topologyKey` is mandatory and must be non-empty for all required rules.
+An anti-affinity gotcha: with `requiredDuringScheduling` anti-affinity on `kubernetes.io/hostname` and a selector matching the pod's own label, you get strict one-per-node. If replicas exceed nodes, the surplus pods stay **Pending** (`didn't satisfy existing pods anti-affinity rules`) — by design, not a bug.
 
-Cross-namespace: `labelSelector` matches pods **in the pod's own namespace** by default; add `namespaces:` or `namespaceSelector:` to widen.
+---
 
-Two behaviors worth knowing cold:
+## Taints and tolerations: the node's side of the contract
 
-1. **Symmetry.** Required *anti*-affinity is symmetric and enforced both ways: if running pod A repels pods labeled `app=b`, an incoming `app=b` pod is filtered off A's node even though the incoming pod declares nothing — the event says `didn't satisfy existing pods anti-affinity rules`. Affinity is not symmetric (A loving B does not drag B toward A), though the scheduler does *score* toward pods that expressed affinity for the incoming pod.
-2. **Bootstrap special case.** Required pod affinity with zero matching pods anywhere would deadlock the first replica ("nothing to be near"). The scheduler special-cases this: if no pod matches the term but the **incoming pod's own labels** satisfy it, the node passes. Self-affine Deployments therefore start fine — and clump onto one node, which is usually the opposite of what the author wanted. For spreading, anti-affinity or topology spread; affinity-to-self is a clumping tool.
-
-Cost/rigidity guidance: required anti-affinity on hostname caps your replica count at your (untolerated) node count — replica 4 on a 3-node cluster is permanently Pending. When the requirement is "spread evenly" rather than "never co-locate", topology spread constraints (below) are the better and cheaper tool.
-
-## Taints and tolerations: node-side repulsion
-
-A taint is `key=value:Effect` on a node. A pod is repelled from the node unless it has a matching toleration. Tolerations do **not** attract — they only remove a barrier.
+A **taint** repels pods; a **toleration** on a pod lets it ignore a matching taint. Taints are `key=value:effect` on the node; tolerations are per-pod.
 
 ```bash
-k taint node cka-worker dedicated=infra:NoSchedule      # add
-k taint node cka-worker dedicated=infra:NoSchedule-     # remove (exact match)
-k taint node cka-worker dedicated-                      # remove all effects of key
-k describe node cka-worker | grep Taints
+k taint nodes cka-worker workload=batch:NoSchedule      # add
+k taint nodes cka-worker workload=batch:NoSchedule-     # remove (trailing dash)
+k taint nodes cka-worker workload-                        # remove ALL taints with this key
 ```
 
-The trailing `-` removal syntax is not discoverable from `--help` in a panic — memorize it.
+### Effects
 
-**Effects:**
-
-| Effect | New pods | Running pods |
+| Effect | New pods without toleration | Already-running pods |
 |---|---|---|
-| `NoSchedule` | hard-filtered | untouched — pods present before the taint keep running |
-| `PreferNoSchedule` | avoided (Score-time only) | untouched |
-| `NoExecute` | hard-filtered | **evicted** unless tolerated; the only mechanism that acts on running pods |
+| `NoSchedule` | rejected by the filter | untouched |
+| `PreferNoSchedule` | scheduled elsewhere if possible (soft) | untouched |
+| `NoExecute` | rejected | **evicted** unless they tolerate it |
 
-**Toleration matching.** A toleration matches a taint when keys are equal, effects are equal (an **empty `effect` matches all effects**), and:
-
-- `operator: Equal` → `value` must also match exactly.
-- `operator: Exists` → any value; omit `value` entirely.
-- `operator: Exists` with **empty key** → tolerates *everything* (this is how DaemonSets like kube-proxy run everywhere).
+### Tolerations
 
 ```yaml
-tolerations:
-- key: dedicated
-  operator: Equal
-  value: infra
-  effect: NoSchedule
-- key: maintenance
-  operator: Exists
-  effect: NoExecute
-  tolerationSeconds: 300
+apiVersion: v1
+kind: Pod
+metadata:
+  name: batch-worker
+spec:
+  tolerations:
+    - key: workload
+      operator: Equal          # key AND value AND effect must match
+      value: batch
+      effect: NoSchedule
+    - key: node.kubernetes.io/not-ready
+      operator: Exists         # value ignored; matches any value for the key
+      effect: NoExecute
+      tolerationSeconds: 30     # stay 30s after taint appears, then evict
+  containers:
+    - name: c
+      image: busybox:1.36
+      command: ["sleep", "infinity"]
 ```
 
-YAML trap: taint values like `true` must be quoted in a toleration (`value: "true"`) or the API rejects the bool.
+- `operator: Equal` (default) requires `key`, `value`, and `effect` to match the taint.
+- `operator: Exists` ignores `value` — matches any value for that key. An **empty `key` with `Exists`** tolerates *every* taint (this is how a monitoring DaemonSet stays on every node).
+- Omitting `effect` in a toleration tolerates **all effects** for that key.
+- `tolerationSeconds` applies only to `NoExecute`: how long a tolerating pod stays before it is evicted anyway. `null`/absent = tolerate forever.
 
-**tolerationSeconds** (NoExecute only): "I tolerate this taint, but only for N seconds after it appears; then evict me." Omitted → tolerate forever. This is the load-bearing field for node-failure behavior:
+**A toleration is permission, not attraction.** Tolerating a taint does not *pull* a pod onto the tainted node; it only removes the barrier. To both repel others and attract yours, pair a taint (on the node) with a matching toleration **and** a `nodeSelector`/affinity (on the pod). This taint+affinity pairing is the standard "dedicated nodes" pattern and a common exam combination.
 
-**Built-in taints — the node lifecycle machinery.** The node controller translates node conditions into taints:
+### Built-in taints and the 5-minute eviction
 
-| Taint | When applied | Effect |
-|---|---|---|
-| `node.kubernetes.io/not-ready` | node condition Ready=False | NoExecute |
-| `node.kubernetes.io/unreachable` | Ready=Unknown (kubelet stopped reporting) | NoExecute |
-| `node.kubernetes.io/unschedulable` | node cordoned | NoSchedule |
-| `node.kubernetes.io/memory-pressure` / `disk-pressure` / `pid-pressure` | kubelet pressure conditions | NoSchedule |
-| `node.kubernetes.io/network-unavailable` | CNI not ready | NoSchedule |
+The node controller and kubelet apply taints automatically. The two that dominate troubleshooting:
 
-The admission controller `DefaultTolerationSeconds` injects into **every** pod tolerations for `not-ready` and `unreachable` with `tolerationSeconds: 300`. Chain the mechanics: node dies → ~40s later Ready goes Unknown → `unreachable:NoExecute` taint lands → each pod's 300s toleration timer starts → pods are deleted and rescheduled ~5–6 minutes after failure. That "why did failover take 5 minutes?" question is answered entirely by this default. Tune per-pod by declaring your own toleration with a shorter `tolerationSeconds`.
+- `node.kubernetes.io/not-ready:NoExecute` — kubelet stopped reporting Ready (`status=False`).
+- `node.kubernetes.io/unreachable:NoExecute` — node controller lost contact (`status=Unknown`).
 
-Sharp edge: NoExecute evictions are performed by the taint manager as direct deletions — **they do not go through the Eviction API and do not respect PodDisruptionBudgets**. PDBs protect against *voluntary* disruption (drain), not taints.
+When a node goes down, the node controller taints it `unreachable:NoExecute`. Pods do **not** vanish immediately: an admission plugin (`DefaultTolerationSeconds`) has already injected default tolerations for `not-ready` and `unreachable` with `tolerationSeconds: 300` into every pod. So pods sit for **5 minutes** before eviction and rescheduling. This is why "node died but pods are still there" for a few minutes is *correct behavior*, not a stuck cluster. Other built-ins: `memory-pressure`, `disk-pressure`, `pid-pressure` (NoSchedule), `network-unavailable`, and `node.kubernetes.io/unschedulable:NoSchedule` (added by cordon).
 
-**Dedicated-node recipe** (taints repel, they don't reserve): taint the node `team=payments:NoSchedule` *and* give the workload both a toleration (so it can enter) and a nodeSelector/affinity (so it must enter). Toleration alone lets the pod land on any other node too.
+---
 
-## Cordon vs drain
+## Cordon, drain, and PodDisruptionBudgets
+
+### cordon
 
 ```bash
-k cordon cka-worker      # spec.unschedulable=true → unschedulable:NoSchedule taint. Running pods untouched.
+k cordon cka-worker      # .spec.unschedulable=true; adds node.kubernetes.io/unschedulable:NoSchedule
+k uncordon cka-worker    # reverse
+```
+
+Cordon marks the node unschedulable and taints it — **new** pods won't land, **existing** pods keep running. It is the reversible "stop bleeding new work onto this node" switch.
+
+### drain = cordon + evict
+
+`kubectl drain` first cordons, then evicts every pod via the **Eviction API** (which honors PDBs). It refuses to proceed unless you acknowledge the categories of pods it can't cleanly move:
+
+| Flag | When it is required | Why |
+|---|---|---|
+| `--ignore-daemonsets` | almost always | DaemonSet pods would be immediately recreated on the same node; drain refuses to evict them unless told to skip them. kube-proxy/CNI are DaemonSets, so real clusters *always* need this. |
+| `--delete-emptydir-data` | any pod uses an `emptyDir` volume | that data is destroyed on eviction; drain won't silently lose it. |
+| `--force` | any pod is **not** managed by a controller (bare pod, static pod) | such pods won't be recreated elsewhere; drain won't orphan them without consent. |
+
+```bash
 k drain cka-worker --ignore-daemonsets --delete-emptydir-data
-k uncordon cka-worker    # after maintenance. Nothing comes back on its own.
+# add --force only if bare/unmanaged pods exist:
+k drain cka-worker --ignore-daemonsets --delete-emptydir-data --force
 ```
 
-`drain` = cordon first, then **evict** every evictable pod via the Eviction API (`pods/eviction` subresource), which is what makes it PDB-aware. Bare `kubectl delete pod` is not.
+The message tells you which flag is missing (`cannot delete DaemonSet-managed Pods`, `cannot delete Pods with local storage`, `cannot delete Pods not managed by ...`). Add the named flag; don't guess the whole set up front.
 
-Refusals and their flags — drain is conservative and aborts with an explicit reason:
+### PDBs block drains — on purpose
 
-| Drain complaint | Why | Flag / action |
-|---|---|---|
-| `cannot delete DaemonSet-managed Pods` | DS controller would instantly recreate them (they tolerate `unschedulable`) | `--ignore-daemonsets` — leaves them running |
-| `cannot delete Pods with local storage` | pod uses `emptyDir`; data dies with the pod | `--delete-emptydir-data` (old name `--delete-local-data`, pre-v1.20) |
-| `cannot delete Pods declaring no controller` | bare pod; nothing will recreate it | `--force` — deletes it permanently |
-| hangs repeating `Cannot evict pod as it would violate the pod's disruption budget` | Eviction API returns 429 while `ALLOWED DISRUPTIONS` is 0 | not a flag problem — fix the math: scale the workload up, or relax the PDB. `--timeout` bounds the retry loop; `--disable-eviction` bypasses PDBs entirely (deletes directly — last resort) |
+A **PodDisruptionBudget** caps how many pods of a set may be *voluntarily* disrupted at once (`minAvailable` or `maxUnavailable`). The Eviction API consults it: if evicting the next pod would drop availability below the budget, the API returns **429 Too Many Requests** and `drain` retries, waiting. This is intended protection — but a misconfigured PDB blocks a drain **forever**:
 
-Static (mirror) pods are silently skipped — drain cannot remove them and does not fail on them.
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb
+spec:
+  minAvailable: 3           # with only 3 replicas, ZERO may be evicted -> drain hangs
+  selector:
+    matchLabels:
+      app: web
+```
 
-Failure-mode detail that costs real points: an aborted or Ctrl-C'd drain **leaves the node cordoned**. Later tasks then mysteriously fail to schedule. After any drain exercise, verify no node shows `SchedulingDisabled` in `k get nodes`. Standard maintenance sequence: `drain` → do the work (upgrade, reboot) → `uncordon`.
+If `minAvailable` equals the replica count (or `maxUnavailable: 0`), no pod can ever be evicted and the drain hangs. Exam fix: identify the PDB (`k get pdb -A`, look at `ALLOWED DISRUPTIONS: 0`), then loosen it (`maxUnavailable: 1`), scale the app up so the budget allows a disruption, or — if the task permits force — delete the pods directly. Note `--force` does **not** bypass a PDB; only deleting pods directly (not via the Eviction API) or editing the PDB does.
 
-Exam flavor: on the real exam this appears inside kubeadm-upgrade tasks ("drain node X before upgrading") with you SSH'd into real hosts; the kubectl side is identical to the kind lab.
+---
 
-## Static pods: the kubelet's private workloads
+## Static pods: kubelet-run, API-mirrored
 
-A static pod is run by the **kubelet directly** from a manifest file on the node's disk — no API server involvement in its lifecycle. The kubelet watches the directory named by `staticPodPath` in its config file:
+A **static pod** is a pod the kubelet runs directly from a manifest file on the node's disk — no scheduler, no controller, no API server required to *start* it. The kubelet watches `staticPodPath` from its config:
 
 ```bash
-# on the node (kind: docker exec -it cka-worker bash; exam: ssh node01 + sudo)
-grep staticPodPath /var/lib/kubelet/config.yaml
-# staticPodPath: /etc/kubernetes/manifests
+grep staticPodPath /var/lib/kubelet/config.yaml     # -> staticPodPath: /etc/kubernetes/manifests
 ```
 
-Kubeadm sets `/etc/kubernetes/manifests` — and runs the entire control plane from it: `etcd`, `kube-apiserver`, `kube-controller-manager`, `kube-scheduler` are static pods. This is why a broken apiserver can't be fixed with kubectl (chicken-and-egg) and why week 9's control-plane recovery drills happen in this directory.
+Drop a pod manifest into that directory and the kubelet runs it within seconds. This is how kubeadm runs the control plane (`etcd`, `kube-apiserver`, `kube-controller-manager`, `kube-scheduler` are all static pods in `/etc/kubernetes/manifests` on the control-plane node).
 
-**Mirror pods.** For visibility, the kubelet creates a read-only *mirror pod* on the API server for each static pod, named `<manifest-name>-<node-name>` — `kube-apiserver-cka-control-plane`, or your `static-web` on cka-worker appearing as `static-web-cka-worker`. The suffix is the identification tell the notes checkpoint asks for; the rigorous checks:
+### Mirror pods and the name suffix
+
+For visibility, the kubelet creates a read-only **mirror pod** object in the API server. Its name is `<manifest-pod-name>-<node-name>` — e.g. a manifest named `web` on `cka-worker` appears as `web-cka-worker`. **That node-name suffix is the tell**: a `-cka-worker` / `-cka-control-plane` suffix on a pod almost certainly means "static pod". Confirm with the owner reference:
 
 ```bash
-k get po -n kube-system kube-apiserver-cka-control-plane -o jsonpath='{.metadata.ownerReferences[0].kind}'
-# Node   ← static pods are owned by the Node object; Deployment pods say ReplicaSet
-k get po -n kube-system kube-apiserver-cka-control-plane -o jsonpath='{.metadata.annotations.kubernetes\.io/config\.source}'
-# file
+k get pod web-cka-worker -o jsonpath='{.metadata.ownerReferences[0].kind}'   # -> Node
 ```
 
-**Lifecycle rules that trip people:**
+An owner reference of kind `Node` (not `ReplicaSet`/`DaemonSet`) is the definitive marker.
 
-- `kubectl delete` on a mirror pod appears to work — and the kubelet recreates it within seconds. The API object is a projection; the source of truth is the file.
-- `kubectl edit` / `apply` on a mirror pod is rejected or ineffective. To change a static pod, **edit the file on the node**.
-- To **stop** one: move the manifest out of the directory (`mv /etc/kubernetes/manifests/foo.yaml /tmp/`). The kubelet notices on its file re-scan (`fileCheckFrequency`, default 20s) and kills the pod. Move it back to restart — this mv-out/mv-in cycle is also the standard way to bounce a control-plane component.
-- No scheduler involvement at all: `NoSchedule` taints don't apply; the pod runs wherever the file is. Tolerations/affinity in the manifest are irrelevant to placement.
-- The kubelet's admission still applies: a static pod exceeding allocatable resources or violating its own nodeSelector will be rejected by the kubelet (visible only in kubelet logs / `crictl`, since there may be no working API to post events to).
+### You cannot manage it through the API
 
-## Topology spread constraints: even distribution as a first-class primitive
+`kubectl delete pod web-cka-worker` removes the mirror, and the kubelet recreates it within a second because the manifest is still on disk. **To stop a static pod you must remove its manifest file from `staticPodPath` on the node**:
 
-Anti-affinity gives binary never-together; spread constraints give **bounded imbalance**:
+```bash
+# on the node (kind: docker exec into it):
+mv /etc/kubernetes/manifests/web.yaml /root/web.yaml     # kubelet stops the pod; mirror disappears
+```
+
+Static pods bypass scheduling entirely (like `nodeName`): they ignore taints, `schedulerName`, and requests-based feasibility. They also can't consume API objects the way normal pods do — no ServiceAccount token projection, and referencing ConfigMaps/Secrets is unsupported because they exist independent of the API. On the exam, "create a static pod on node X" means: write the manifest, get it into `/etc/kubernetes/manifests` **on that node**, and verify the `-X` mirror appears with `k get pods -A`.
+
+---
+
+## Topology spread constraints: even distribution, precisely
+
+`topologySpreadConstraints` control how evenly pods matching a selector are distributed across topology domains. This is the modern, cheaper answer to "spread evenly" and the exam's preferred spread primitive.
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: web
+  name: spread-web
 spec:
   replicas: 6
   selector:
     matchLabels:
-      app: web
+      app: spread-web
   template:
     metadata:
       labels:
-        app: web
+        app: spread-web
     spec:
       topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: DoNotSchedule
-        labelSelector:
-          matchLabels:
-            app: web
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: spread-web
       containers:
-      - name: app
-        image: nginx:1.27
+        - name: c
+          image: nginx:1.27
 ```
 
-**Skew math.** For each domain (distinct `topologyKey` value among eligible nodes): `skew = pods-in-this-domain − min(pods in any eligible domain)`, counting only pods matching `labelSelector` in the same namespace. A node passes the filter if placing the pod there keeps skew ≤ `maxSkew`. On the 3-node kind cluster with 6 replicas and the constraint above, you converge to 2/2/2.
+- **`maxSkew`** — the maximum allowed difference between the domain with the most matching pods and the domain with the fewest eligible domain. `maxSkew: 1` across 3 hosts with 6 replicas → 2-2-2 (perfectly even); it will never let one host get 2 ahead of another.
+- **`topologyKey`** — the node label defining a domain (`kubernetes.io/hostname` = per node, `topology.kubernetes.io/zone` = per zone).
+- **`whenUnsatisfiable`** — `DoNotSchedule` (hard: if placing here would exceed `maxSkew`, keep the pod Pending) vs `ScheduleAnyway` (soft: prefer balanced, but schedule regardless).
+- **`labelSelector`** — which existing pods count toward the skew. Usually the workload's own labels.
+- **`minDomains`** (optional) — require at least N domains to be counted, forcing spread even when some domains are empty.
 
-**Field semantics:**
+Difference from pod anti-affinity: anti-affinity is all-or-nothing per domain ("never two here"); topology spread is graduated ("keep them within `maxSkew` of each other"). Spread lets you say "at most one more on the busiest node than the emptiest" without forbidding co-location outright.
 
-- `whenUnsatisfiable: DoNotSchedule` → hard Filter (pods go Pending). `ScheduleAnyway` → demoted to a Score preference; never blocks.
-- `labelSelector` is **not defaulted** — forget it and every domain counts 0 matching pods, making the constraint vacuous. It should normally match the pod's own labels.
-- Multiple constraints are ANDed.
-- `minDomains` (stable v1.30): with DoNotSchedule, treat fewer-than-N populated domains as skew — forces using at least N domains.
-- `matchLabelKeys` (beta, on by default v1.27+): add e.g. `pod-template-hash` so each ReplicaSet generation spreads independently — without it, a rolling update counts the old RS's pods and the new pods spread lopsidedly.
+A subtle rollout trap: without `matchLabelKeys: [pod-template-hash]` (added in newer versions, GA'd more recently), old and new ReplicaSet pods both match the selector during a rolling update, and the constraint counts them together — which can wedge the rollout as `Pending`. Where available, add `pod-template-hash` to `matchLabelKeys` so each revision is spread independently. Verify availability in your exam cluster's version.
 
-**The domain-counting trap (directly reproducible on kind).** Two policy fields (v1.26+) control which nodes count as domains: `nodeAffinityPolicy` (default `Honor` — nodes failing the pod's own nodeSelector/affinity are excluded) and `nodeTaintsPolicy` (default **`Ignore`** — tainted nodes still count as domains even though the pod cannot land there). Consequence on kind: the tainted control-plane is a permanent 0-pod domain. With `maxSkew: 1`, `DoNotSchedule` and no toleration, replicas 1–2 land one per worker, and replica 3 is stuck: any worker placement makes skew (2−0)=2. Result: 2 Running, everything else Pending. Fixes: tolerate the control-plane taint (spread across 3 domains), or set `nodeTaintsPolicy: Honor` (control-plane stops being a domain), or `ScheduleAnyway`. Exercise 6 makes you hit this live.
+---
 
-**No rebalancing.** Like everything except NoExecute, spread is enforced at scheduling time only. Scale-downs, evictions, and node restarts can leave arbitrary skew; nothing moves running pods to fix it (that is the descheduler's job, out of exam scope). The cluster also ships built-in *soft* defaults (zone maxSkew 3, hostname maxSkew 5, ScheduleAnyway) — why vanilla Deployments spread roughly evenly with no configuration.
+## Requests drive scheduling (limits do not)
 
-## PriorityClass and preemption: who wins under scarcity
+The `NodeResourcesFit` filter compares the pod's total **requests** against each node's **allocatable minus already-requested**. Two facts that decide many tasks:
+
+- **Limits are irrelevant to scheduling.** Only `requests` are summed for feasibility. A pod with `limits` but no `requests` inherits requests = limits; a pod with neither requests nothing and schedules anywhere (BestEffort QoS), which is why a "must land on the big node" task sometimes needs a *request* added, not a limit.
+- **A pod's effective request per resource is `max(sum of app-container requests, max init-container request)`.** Init containers run sequentially, so their peak (not sum) counts alongside the app containers' sum.
+
+`0/3 nodes are available: 3 Insufficient cpu` means the summed CPU request exceeds free allocatable on every node. Diagnose with:
+
+```bash
+k describe node cka-worker | sed -n '/Allocated resources/,/Events/p'   # Requests vs Allocatable
+k get pod <p> -o jsonpath='{.spec.containers[*].resources.requests}'
+```
+
+Fix by lowering the request, freeing capacity (evict/scale down other pods), or moving to a node with headroom.
+
+---
+
+## PriorityClass and preemption
+
+A **PriorityClass** maps a name to an integer priority. Higher values schedule first, and — if enabled — a high-priority pod that can't fit will **preempt** (evict) lower-priority pods to make room.
 
 ```yaml
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
-  name: prod-critical
+  name: high-priority
 value: 1000000
 globalDefault: false
-description: Production critical workloads
 preemptionPolicy: PreemptLowerPriority
+description: "Critical workloads that may evict lower-priority pods"
 ```
-
-```bash
-k create priorityclass prod-critical --value=1000000 --description="prod critical"   # imperative, exam-fast
-```
-
-Cluster-scoped, non-namespaced. `value` up to 1,000,000,000 for user classes; the system reserves higher for `system-cluster-critical` (2000000000) and `system-node-critical` (2000001000) — used by kube-system components and the reason they win every fight. At most one class may set `globalDefault: true` (applies to new pods only); otherwise unclassed pods get priority 0. Pods reference it by name:
 
 ```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: critical
 spec:
-  priorityClassName: prod-critical
+  priorityClassName: high-priority
+  containers:
+    - name: c
+      image: nginx:1.27
+      resources:
+        requests:
+          cpu: "1"
 ```
 
-`priorityClassName` resolves to `spec.priority` (an integer) at admission — deleting the PriorityClass later doesn't change existing pods. A pod referencing a nonexistent class is **rejected at creation** (validation error, not Pending).
+Mechanics:
 
-**Priority acts twice:**
+- Admission stamps `.spec.priority` from the class. The scheduling queue's `activeQ` sorts by priority first, so high-priority pods are scheduled ahead of low ones already waiting.
+- If a high-priority pod fails all filters, the **PostFilter** (preemption) plugin looks for a node where evicting one or more lower-priority pods would let it fit. It picks the node causing the fewest/cheapest evictions, sets `.status.nominatedNodeName` on the preemptor, and deletes the victims **gracefully** (they get their termination grace period).
+- **PDBs are respected on a best-effort basis** during preemption — the scheduler prefers victims that don't violate a PDB, but will violate one if that's the only way to schedule a higher-priority pod. Don't count on a PDB to stop preemption.
+- `preemptionPolicy: Never` makes the pod jump the queue (scheduled before lower-priority pods) **without** evicting anyone. `PreemptLowerPriority` (default) allows eviction.
+- `globalDefault: true` (only one class may set it) assigns this priority to pods that name no class. Existing pods are unaffected retroactively.
+- Reserved system classes: `system-cluster-critical` (2000000000) and `system-node-critical` (2000001000) — do not exceed these with user classes.
 
-1. **Queue order** — higher-priority Pending pods are popped from activeQ first.
-2. **Preemption** — when a pod fails all Filters, the PostFilter (DefaultPreemption) searches for nodes where evicting lower-priority pods would make it fit. It picks the cheapest victim set (fewest PDB violations first, then lowest victim priorities), writes the pod's `status.nominatedNodeName`, and deletes victims via the eviction path with their full `terminationGracePeriodSeconds` (no SIGKILL shortcut). The preemptor then re-enters the queue — it is *not* guaranteed the nominated node; a better node can appear or a higher-priority pod can steal the space.
+To watch preemption on the exam, create a low-priority pod that fills a node's CPU requests, then a high-priority pod that needs the same CPU — describe the low pod's events for `Preempted by ...` and the high pod's for `nominatedNodeName`.
 
-Mechanics that show up in questions and postmortems:
+---
 
-- Preemption only compares **pod priority** — never resource requests, never "importance" of the workload, never QoS class. (QoS matters for *kubelet node-pressure eviction*, a different subsystem.)
-- PDBs are **best-effort** in preemption: the scheduler prefers victim sets that don't violate PDBs but will violate them if that is the only way to place the preemptor.
-- Victims must have *strictly lower* priority. Equal priority never preempts.
-- `preemptionPolicy: Never` → the pod still gets queue-order benefits but will not evict anyone (batch-friendly "high priority, polite").
-- Forensics: `k get po -o wide` shows the preemptor Pending with `NOMINATED NODE` set; victims show `Preempted` events.
+## Multiple schedulers and `schedulerName`
 
-## How requests drive scheduling
+Every pod carries `.spec.schedulerName` (default `default-scheduler`). A pod is only ever considered by a scheduler whose configured `profiles[].schedulerName` matches. You can run a second scheduler (as a Deployment) or run one `kube-scheduler` binary with multiple **profiles**, each a distinct `schedulerName` with its own plugin config.
 
-The NodeResourcesFit filter compares the **sum of `requests`** of pods already assigned to a node against the node's **allocatable** (capacity minus system/kube reservations and eviction thresholds). Three things it does *not* look at:
-
-- **Limits** — irrelevant to scheduling entirely.
-- **Actual usage** — a node at 5% real CPU utilization but fully *requested* rejects new pods with `Insufficient cpu`. Scheduling is bookkeeping, not telemetry. (`kubectl top` is for node-pressure debugging, not scheduling debugging.)
-- A pod with **no requests** fits anywhere resource-wise — and is the first to die under pressure (week 4/9 territory).
-
-Effective pod request = `max(max(initContainers), sum(containers))` plus `pod overhead` if a RuntimeClass sets it — init containers run serially, so a fat init container alone can block scheduling. Forensics pair:
-
-```bash
-k describe node cka-worker | grep -A 8 'Allocated resources'   # requested vs allocatable, per resource
-k get po -A -o wide --field-selector spec.nodeName=cka-worker  # who is occupying it
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: custom-sched
+spec:
+  schedulerName: my-scheduler
+  containers:
+    - name: c
+      image: nginx:1.27
 ```
 
-`Insufficient cpu` in a FailedScheduling event is therefore fixed by one of: lower the pod's requests, delete/scale down squatters, add nodes, or preempt via priority. On the exam, "lower the requests" is almost always the intended move — check whether the task's requests are plausibly a typo (`"1000m"` vs `"1000"`... i.e. 1 CPU vs 1000 CPUs, or `memory: 64Gi` on an 8Gi node).
+The exam-relevant fact is the failure mode: **if `schedulerName` names a scheduler that is not running, the pod is Pending with no events at all** — no scheduler owns it, so nobody emits `FailedScheduling`. This is the same "silent Pending" signature as a direct `nodeName` to a bad node, and distinguishing the two (`k get pod -o yaml | grep -E 'schedulerName|nodeName'`) is a fast forensic win. Know the field exists, know how to set it, and recognize the silence it causes when misused.
 
-## Multiple schedulers and schedulerName
+---
 
-Every pod has `spec.schedulerName` (default `default-scheduler`). Each scheduler process only picks up pods naming it. You can run additional schedulers — typically the same kube-scheduler binary with a KubeSchedulerConfiguration setting a different `schedulerName` and its own leader-election lock, deployed as a Deployment in kube-system. The exam needs awareness, not construction:
+## A note on DaemonSet scheduling
 
-- Pod with `schedulerName: my-scheduler` and no such scheduler running → **Pending forever, zero events**. Nothing claims it, nothing complains. This "silent Pending" signature (shared with nodeName-to-nonexistent-node) is a deliberately nasty troubleshooting scenario: no events means *no scheduler processed the pod* — immediately check `spec.schedulerName`, then whether kube-scheduler itself is healthy in kube-system.
-- `schedulerName` is immutable; fixing it means recreate (`k get po x -o yaml > f.yaml`, fix, `k replace --force -f f.yaml`).
-- Which scheduler placed a pod: the `Scheduled` event's source (`k describe po` shows `default-scheduler` or your custom name).
-
-## DaemonSets: scheduling's special child
-
-DaemonSets earn their scheduling note: the DS controller creates one pod per eligible node, and (since v1.12; GA v1.17) the **default scheduler** binds them — the controller injects into each pod a `nodeAffinity` with a `matchFields` term on `metadata.name=<target-node>`, pinning it while keeping taints/resources honored. The controller also injects tolerations for `not-ready`, `unreachable` (both NoExecute — DS pods survive node failure taints), `disk-pressure`, `memory-pressure`, `pid-pressure`, `unschedulable`, and `network-unavailable`.
-
-Operational consequences:
-
-- DS pods schedule onto **cordoned** nodes (they tolerate `unschedulable`) and survive drains — hence `--ignore-daemonsets`.
-- DS pods do **not** automatically tolerate custom taints or the control-plane taint. Monitoring-agent-on-every-node tasks require adding `node-role.kubernetes.io/control-plane: Exists: NoSchedule` to the DS pod template — a classic exam task.
-- Limiting a DS to some nodes: `nodeSelector`/affinity in the pod template, exactly like any pod.
+DaemonSet pods are scheduled by the **default scheduler** (not the DS controller directly, in current versions): the controller creates each pod with a `nodeAffinity` pinning it to one node's `kubernetes.io/hostname`, and the scheduler binds it. This matters for two reasons. First, DaemonSet pods carry **automatic tolerations** for the standard node conditions (`not-ready`, `unreachable`, `disk-pressure`, `memory-pressure`, `pid-pressure`, `unschedulable`) so they keep running on troubled nodes — but they do **not** automatically tolerate *your* custom taints or the control-plane taint. To run a DaemonSet on the control plane or a custom-tainted node, you add the toleration yourself. Second, because DS pods are recreated per node, `drain` refuses to evict them without `--ignore-daemonsets`.
 
 ---
 
 ## Traps
 
-1. **"nodeSelectorTerms are ANDed."** No — terms are **ORed**; `matchExpressions` inside a term are ANDed. Nesting two conditions as separate terms when you meant AND silently widens placement; the pod schedules "successfully" onto a wrong node and you lose the points without an error.
-2. **"Tainting the node moves my pods there."** Taints repel others; they attract nothing. Dedicated-node tasks need taint + toleration + nodeSelector/affinity. If the task says "ensure *only* pods X run on the node **and** X runs there", a toleration alone is half the answer.
-3. **"The toleration didn't work — the pod is still Pending."** Tolerating a taint only removes that one barrier; the pod must still pass affinity, resources, and every other Filter. Read the *full* FailedScheduling message: the taint fragment may be gone while `Insufficient cpu` remains.
-4. **"nodeName respects taints."** It bypasses the scheduler: NoSchedule/cordon are ignored. But NoExecute still evicts, and the kubelet still rejects on resources (`OutOfcpu` — a *failed* pod, not Pending). Different symptom, different mechanism.
-5. **Taint removal syntax.** `k taint node X key=value:NoSchedule-` — the trailing dash, with effect included (or `key-` for all). Trying `k taint node X key=null` or editing YAML wastes minutes.
-6. **"PDBs protected us during the outage."** NoExecute/taint-manager evictions are direct deletions — PDBs only govern the Eviction API (drain). Also: the 5-minute failover delay after node death is the injected `tolerationSeconds: 300` defaults, not a scheduler timer.
-7. **"Drain failed, so I'll fix and rerun later"** — and the node stays **cordoned**, breaking subsequent tasks with `node(s) were unschedulable`. Always `k get nodes` after drain work; uncordon what you cordoned.
-8. **Editing a mirror pod.** `k edit po kube-apiserver-...` will never persist. Static pods are files; change `/etc/kubernetes/manifests/*.yaml` on the node. Similarly `k delete` on one is a no-op with extra steps (kubelet recreates it).
-9. **"Cordon evicts pods."** Cordon only blocks *new* scheduling. Existing pods stay. Moving pods off is drain's job.
-10. **Topology spread on kind deadlocks.** Default `nodeTaintsPolicy: Ignore` counts the tainted control-plane as an eligible 0-pod domain; with `maxSkew: 1` + `DoNotSchedule`, replica 3+ goes Pending. Tolerate the taint, set `nodeTaintsPolicy: Honor`, or use `ScheduleAnyway`. And a forgotten `labelSelector` makes the constraint count nothing — silently useless.
-11. **"The scheduler will rebalance."** Nothing rebalances running pods: not spread constraints, not affinity, not priority. All placement is schedule-time except NoExecute eviction.
-12. **"The node has plenty of free CPU"** (per `kubectl top`) but the pod is Pending with `Insufficient cpu` — scheduling is on *requests*, not usage. Compare `Allocated resources` in `k describe node`, not live metrics.
-13. **Silent Pending, zero events.** Not a taint, not resources — nothing scheduled the pod at all. Check `spec.schedulerName` (typo'd/custom absent scheduler) or a dead kube-scheduler. `schedulerName` is immutable: recreate the pod.
-14. **Hand-writing affinity YAML from memory.** There is no imperative flag for affinity/tolerations/spread. The fast path is `k run x --image=nginx $do > p.yaml` + paste the block from the docs (Assign Pods to Nodes page) and adapt. And pod-spec placement fields are immutable — fixing a live pod means `k replace --force -f`, not `k edit` (which will refuse).
-15. **Gt/Lt values are strings.** `values: [8]` fails validation; `values: ["8"]` parses. Likewise toleration `value: true` must be `value: "true"`.
-16. **Debugging a preferred rule as if it were required.** `preferred...` losing to other score plugins and landing "wrong" is working as designed. If the task says *must*, use `required...`; if it says *should/prefer*, points may depend on using `preferred...`.
-17. **Zone topologyKeys on unlabeled clusters.** `topology.kubernetes.io/zone` on nodes without the label: pod affinity can never match (Pending); spread constraints simply have no domains. kind sets only `kubernetes.io/hostname` — label nodes yourself to simulate zones.
+- **"Terms are ANDed."** Wrong. In node affinity, `nodeSelectorTerms` are **ORed**; only the `matchExpressions` *inside* one term are ANDed. Put AND conditions in one term, OR conditions in separate terms.
+- **"A toleration schedules my pod onto the tainted node."** No — a toleration only removes the barrier. Without a matching `nodeSelector`/affinity, a tolerating pod may still land on any *other* untainted node. Pair taint + toleration + affinity for dedicated nodes.
+- **"`nodeName` respects taints/resources."** It bypasses the scheduler entirely: no taint check, no resource check. A tainted or full node still accepts it; a nonexistent node leaves it Pending with no event.
+- **"Deleting the mirror pod stops a static pod."** The kubelet recreates it from the on-disk manifest within a second. Remove the file from `staticPodPath` on the node instead.
+- **"Static pod name is what I put in `metadata.name`."** The mirror in the API is `<name>-<nodename>`. Reference `web-cka-worker`, not `web`, in `kubectl`.
+- **"Drain will just work."** It refuses on DaemonSet pods (needs `--ignore-daemonsets`), `emptyDir` pods (needs `--delete-emptydir-data`), and unmanaged pods (needs `--force`). It also hangs indefinitely on a PDB with zero allowed disruptions.
+- **"`--force` bypasses the PDB."** It does not. `--force` only lets drain delete *unmanaged* pods. A blocking PDB must be edited, or the app scaled up, to allow the eviction.
+- **"Limits control scheduling."** Only **requests** are used by `NodeResourcesFit`. A pod with high limits but no requests schedules onto a full node. Set requests when a task depends on capacity fitting.
+- **"Node went down, pods should reschedule instantly."** The default 300s toleration for `unreachable:NoExecute` keeps them ~5 minutes before eviction. That delay is expected.
+- **"Pending must have a FailedScheduling event."** Not if no scheduler owns the pod — a wrong `schedulerName` or a direct `nodeName` produces Pending with **no** scheduler events. Check both fields.
+- **"Anti-affinity surplus is a bug."** With required per-host anti-affinity and more replicas than nodes, the extras stay Pending by design. Fewer replicas, more nodes, or `preferred` anti-affinity.
+- **"`maxSkew` is a per-domain cap."** It's the max *difference* between the busiest and emptiest eligible domain, not a per-domain limit. `maxSkew: 1` over 3 hosts / 6 pods gives 2-2-2, not "≤1 per host".
+- **Removing a taint/label: forgetting the trailing dash.** `k taint nodes n1 key=value:NoSchedule` *adds*; `...NoSchedule-` (dash) *removes*. Same for labels: `k label node n1 key-`.
 
 ---
 
 ## Speed patterns
 
-**Session setup (once per exam terminal, assumed everywhere below):**
+Aliases assumed: `alias k=kubectl`, `export do="--dry-run=client -o yaml"`.
 
-```bash
-alias k=kubectl
-export do="--dry-run=client -o yaml"
-export now="--grace-period=0 --force"
-```
-
-**Node labeling and tainting** — pure one-liners, no YAML ever:
-
+**Label a node and pin with `nodeSelector` (fastest scheduler-respecting placement):**
 ```bash
 k label node cka-worker disktype=ssd
-k taint node cka-worker dedicated=infra:NoSchedule
-k taint node cka-worker dedicated=infra:NoSchedule-
-k get nodes -L disktype                      # verify labels as a column
-k describe node cka-worker | grep Taints
+k run web --image=nginx:1.27 $do > p.yaml   # then add nodeSelector: {disktype: ssd} under spec
 ```
 
-**Placement YAML in under 3 minutes:** generate the skeleton, then paste-and-adapt the affinity/toleration/spread block from the docs — never type nested YAML from memory:
+**Force a node instantly (accepts the risk):** add `nodeName: cka-worker` under `spec` in the generated YAML — no labels, no affinity.
 
+**Taint / untaint / find taints:**
 ```bash
-k run web --image=nginx:1.27 $do > p.yaml
-# open kubernetes.io/docs → search "assign pods nodes" → copy required-affinity block
-vim p.yaml && k apply -f p.yaml
+k taint nodes cka-worker workload=batch:NoSchedule
+k taint nodes cka-worker workload-                 # remove all 'workload' taints
+k get nodes -o json | jq '.items[]|{name:.metadata.name,taints:.spec.taints}'
+# no jq? describe:
+k describe node cka-worker | grep -i taint
 ```
 
-Offline schema lookup when docs feel slow:
-
+**Cordon + drain for maintenance (the reflex flag set):**
 ```bash
-k explain pod.spec.affinity.nodeAffinity --recursive | less
-k explain pod.spec.topologySpreadConstraints --recursive
-k explain pod.spec.tolerations
-```
-
-**The toleration block is the one worth memorizing** (4 lines, appears constantly):
-
-```yaml
-tolerations:
-- key: node-role.kubernetes.io/control-plane
-  operator: Exists
-  effect: NoSchedule
-```
-
-**Pending triage macro** (30 seconds to a diagnosis):
-
-```bash
-k describe po $P | tail -15                        # the FailedScheduling message
-k get po $P -o jsonpath='{.spec.schedulerName}{"\n"}'   # if there were no events
-k describe node cka-worker | grep -A 8 'Allocated resources'   # if Insufficient*
-```
-
-**Drain macro** (memorize as one unit, plus the closing uncordon):
-
-```bash
-k drain cka-worker --ignore-daemonsets --delete-emptydir-data --force
-# ... maintenance ...
+k drain cka-worker --ignore-daemonsets --delete-emptydir-data
+# ... work ...
 k uncordon cka-worker
 ```
 
-**Immutable-field surgery** (wrong nodeSelector/schedulerName/affinity on a live pod):
-
+**See what's requested vs allocatable when diagnosing Insufficient cpu/memory:**
 ```bash
-k get po broken -o yaml > /tmp/p.yaml
-vim /tmp/p.yaml
-k replace --force -f /tmp/p.yaml     # delete+recreate in one command
+k describe node cka-worker | sed -n '/Allocated resources/,/Events/p'
 ```
 
-**Imperative object creation** (no YAML needed at all):
-
+**Prove a pod is a static pod:**
 ```bash
-k create priorityclass high-prio --value=100000 --description="high"
-k create pdb web-pdb --selector=app=web --min-available=1 -n prod
+k get pod <p>-<node> -o jsonpath='{.metadata.ownerReferences[0].kind}{"\n"}'   # Node
 ```
 
-**Placement verification** (end *every* scheduling task with one of these — points are graded on state, not effort):
-
+**Create a static pod on a kind worker (write manifest on your box, copy into the node):**
 ```bash
-k get po -o wide
-k get po -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase
-k get po -A -o wide --field-selector spec.nodeName=cka-worker
+k run web --image=nginx:1.27 $do > web.yaml
+docker cp web.yaml cka-worker:/etc/kubernetes/manifests/web.yaml
+k get pods -A | grep web-cka-worker          # mirror appears
 ```
 
-**Static pod fast path:**
+**PriorityClass in one shot:** `k create priorityclass high-priority --value=1000000 --description="crit"` (add `--preemption-policy=Never` to jump the queue without evicting). Faster than writing YAML. `--global-default=true` marks it the default for pods that name no class.
 
+**Decode a Pending pod in two commands:**
 ```bash
-docker exec -it cka-worker bash                       # exam: ssh node01; sudo -i
-grep staticPodPath /var/lib/kubelet/config.yaml       # almost always /etc/kubernetes/manifests
-k run static-web --image=nginx:1.27 $do > /etc/kubernetes/manifests/static-web.yaml  # if kubectl exists on node; else vim
+k get pod <p> -o wide                         # STATUS Pending, NODE none
+k describe pod <p> | sed -n '/Events:/,$p'    # the FailedScheduling tally (or silence)
 ```
+
+**Generate an affinity skeleton fast:** `kubectl explain pod.spec.affinity.nodeAffinity --recursive` reminds you of the exact field nesting when you blank on `nodeSelectorTerms` vs `matchExpressions`.
 
 ---
 
 ## Docs map
 
-Firefox on the exam reaches only kubernetes.io/docs, kubernetes.io/blog, helm.sh/docs. Search terms below are what to type in the docs search box.
+Everything below is reachable in-exam from `kubernetes.io/docs`. Know the paths cold — searching wastes minutes.
 
-| You need | Path under kubernetes.io | Search term |
-|---|---|---|
-| nodeSelector, node affinity, pod affinity YAML | `/docs/concepts/scheduling-eviction/assign-pod-node/` | "assign pods nodes" |
-| Taints, tolerations, built-in taints table | `/docs/concepts/scheduling-eviction/taint-and-toleration/` | "taint toleration" |
-| Topology spread fields + examples | `/docs/concepts/scheduling-eviction/topology-spread-constraints/` | "topology spread" |
-| PriorityClass, preemption details | `/docs/concepts/scheduling-eviction/pod-priority-preemption/` | "priority preemption" |
-| Scheduler overview (filter/score) | `/docs/concepts/scheduling-eviction/kube-scheduler/` | "kube-scheduler" |
-| Framework phases (plugin names in events) | `/docs/concepts/scheduling-eviction/scheduling-framework/` | "scheduling framework" |
-| Static pod how-to | `/docs/tasks/configure-pod-container/static-pod/` | "static pod" |
-| Drain, PDB interplay | `/docs/tasks/administer-cluster/safely-drain-node/` | "drain node" |
-| PDB creation | `/docs/tasks/run-application/configure-pdb/` | "disruption budget" |
-| Multiple schedulers | `/docs/tasks/extend-kubernetes/configure-multiple-schedulers/` | "multiple schedulers" |
-| DaemonSet tolerations table | `/docs/concepts/workloads/controllers/daemonset/` | "daemonset" |
-| Requests/limits, allocatable | `/docs/concepts/configuration/manage-resources-containers/` | "manage resources containers" |
+| What you need | Exact doc path |
+|---|---|
+| Assign pods to nodes (nodeSelector, nodeName) | `/docs/concepts/scheduling-eviction/assign-pod-node/` |
+| Node affinity / pod affinity full reference | `/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity` |
+| Taints and tolerations (effects, built-ins, eviction) | `/docs/concepts/scheduling-eviction/taint-and-toleration/` |
+| Topology spread constraints | `/docs/concepts/scheduling-eviction/topology-spread-constraints/` |
+| Pod priority and preemption | `/docs/concepts/scheduling-eviction/pod-priority-preemption/` |
+| Scheduler framework / extension points | `/docs/concepts/scheduling-eviction/scheduling-framework/` |
+| Kube-scheduler overview | `/docs/concepts/scheduling-eviction/kube-scheduler/` |
+| Configure multiple schedulers / profiles | `/docs/tasks/extend-kubernetes/configure-multiple-schedulers/`, `/docs/reference/scheduling/config/` |
+| Static pods | `/docs/tasks/configure-pod-container/static-pod/` |
+| Safely drain a node | `/docs/tasks/administer-cluster/safely-drain-node/` |
+| PodDisruptionBudget concept + task | `/docs/concepts/workloads/pods/disruptions/`, `/docs/tasks/run-application/configure-pdb/` |
+| Resource requests/limits & scheduling | `/docs/concepts/configuration/manage-resources-containers/` |
+| DaemonSet scheduling & default tolerations | `/docs/concepts/workloads/controllers/daemonset/#taints-and-tolerations` |
+| `kubectl taint` / `cordon` / `drain` reference | `/docs/reference/generated/kubectl/kubectl-commands` |
 
 ---
 
 ## Checkpoint
 
-Self-test cold, on the kind cluster, timed. Redo any item you miss until it is boring.
+Time targets are exam-realistic. If you exceed them, drill the pattern until the YAML nesting is muscle memory.
 
-- Can you explain nodeSelector vs node affinity vs taints vs pod affinity — who declares it, attract or repel — in 30 seconds, no notes?
-- Can you label a node and land a pod on it with nodeSelector in 2 minutes, including verification with `-o wide`?
-- Can you write required node affinity with `In` over two values (docs paste allowed) in 3 minutes?
-- Can you taint a node, prove an ordinary pod won't schedule, then create a tolerating pod that lands there in 5 minutes?
-- Can you state from memory what matches what: `Exists` vs `Equal`, empty key, empty effect, and quote the 4-line control-plane toleration?
-- Can you apply a NoExecute taint and predict — before running it — which pods are evicted immediately, which after N seconds, and why DaemonSet pods stay?
-- Can you produce a 2-replica deployment where replicas never co-locate (anti-affinity, hostname) in 4 minutes, and say when you'd use topology spread instead?
-- Can you spread 6 replicas 2/2/2 across all 3 kind nodes with maxSkew=1 DoNotSchedule — including the control-plane toleration — in 6 minutes?
-- Can you diagnose an arbitrary Pending pod (taint vs affinity vs resources vs cordon vs ghost scheduler) to a written root cause in 3 minutes from `describe` output alone?
-- Can you drain a node past a blocking PDB — without deleting the PDB — and explain why eviction returned 429, in 8 minutes?
-- Can you create a static pod on a kind worker, name its mirror pod before checking, prove `kubectl delete` can't kill it, and then remove it properly, in 6 minutes?
-- Can you create a PriorityClass and demonstrate preemption (victim evicted, `nominatedNodeName` set) in 8 minutes?
-- Can you list the three drain refusal reasons and their flags without looking?
-
-All yes → week 3 exercises, then move on. This module's mechanics are reflex material: on the exam you should spend your thinking budget on *reading the task*, not on remembering where `topologyKey` goes.
+- Can you place a pod on a specific labelled node with `nodeSelector` — label the node and write the pod — in **under 2 minutes**?
+- Can you write a required node-affinity rule for "(zone-a OR zone-b) AND ssd" and explain why it's one term vs two in **under 3 minutes**?
+- Can you taint a node `NoSchedule`, write a matching `Exists` toleration, and confirm the pod schedules there (with an affinity to actually pull it) in **under 4 minutes**?
+- Can you spread 6 replicas 2-2-2 across the 3 kind nodes with `topologySpreadConstraints` (`maxSkew: 1`, `DoNotSchedule`) in **under 4 minutes**?
+- Can you drain a worker with a DaemonSet and an `emptyDir` pod present, choosing the right flags without trial-and-error, in **under 2 minutes**?
+- Given a PDB with `ALLOWED DISRUPTIONS: 0` blocking a drain, can you identify it and unblock the drain in **under 3 minutes**?
+- Can you create a static pod on `cka-worker` and prove it's static via the `-cka-worker` mirror and the `Node` owner reference in **under 4 minutes**?
+- Can you create a `PriorityClass`, schedule a high-priority pod that preempts a low-priority one, and read `Preempted by` from the victim's events in **under 5 minutes**?
+- Given three `Pending` pods — one untolerated taint, one unsatisfiable affinity, one Insufficient cpu — can you name each root cause from `describe` events in **under 3 minutes total**?
+- Can you explain, in 30 seconds each, the difference between `nodeName`/`nodeSelector`/node-affinity and between taints/tolerations vs affinity — and why a toleration alone does not attract a pod?

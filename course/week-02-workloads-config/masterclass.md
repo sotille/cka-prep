@@ -34,7 +34,7 @@ k rollout undo deploy/web --to-revision=2
 k rollout status deploy/web                       # blocks until done or deadline exceeded
 ```
 
-- **Change-cause**: `--record` is deprecated/removed. To populate the CHANGE-CAUSE column: `k annotate deploy/web kubernetes.io/change-cause="image bump to 1.29"` after each change. The annotation on the Deployment is copied to the current ReplicaSet.
+- **Change-cause**: `--record` is deprecated (still present but discouraged). To populate the CHANGE-CAUSE column: `k annotate deploy/web kubernetes.io/change-cause="image bump to 1.29"` after each change. The annotation on the Deployment is copied to the current ReplicaSet.
 
 ### RollingUpdate math
 
@@ -416,6 +416,8 @@ spec:
 ## Helm
 
 Chart = templated manifests + default `values.yaml`. Release = chart installed under a name in a namespace, with numbered revisions stored as Secrets (`sh.helm.release.v1.<name>.v<N>`) in the release namespace — that's why `helm history` survives your terminal and why RBAC on secrets can break Helm.
+
+> The `bitnami/nginx` snippets below are illustrative of the command flow only. Bitnami restructured its public catalog in mid-2025 (images moved to `bitnamilegacy` / Bitnami Secure Images), so these exact `install`/`upgrade` lines may fail to pull. To actually run Helm end-to-end, use the `podinfo` chart from graded Task 14 — the command syntax is identical.
 
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami

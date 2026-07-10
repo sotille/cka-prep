@@ -303,7 +303,7 @@ rules:
 EOF
 
 k get clusterrole view -o jsonpath='{.aggregationRule}'; echo
-k get clusterrole view -o yaml | grep -B1 -A3 '"nodes"'   # or: grep -A3 'nodes'
+k get clusterrole view -o yaml | grep -B1 -A3 nodes   # -o yaml renders `- nodes` unquoted
 k create clusterrolebinding tmp-view-test --clusterrole=view --user=viewer-test
 k auth can-i list nodes --as=viewer-test    # yes
 k delete clusterrolebinding tmp-view-test

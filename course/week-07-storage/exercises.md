@@ -1,405 +1,293 @@
 # Week 07 — Storage Exercises
 
-Lab: 3-node kind cluster `cka` (nodes `cka-control-plane`, `cka-worker`, `cka-worker2`), context `kind-cka`. Default StorageClass is `standard` (`rancher.io/local-path`, WaitForFirstConsumer, reclaim Delete). Aliases assumed: `k`, `$do`, `$now`.
+Lab: the 3-node kind cluster `cka` (context `kind-cka`). Aliases assumed: `alias k=kubectl`, `export do="--dry-run=client -o yaml"`, `export now="--grace-period=0 --force"`. Run every task from the host terminal. The default StorageClass is `standard` (`rancher.io/local-path`, `Delete`, `WaitForFirstConsumer`, `allowVolumeExpansion: false`, RWO-only) — several tasks depend on that. Where a task needs pre-existing (or pre-broken) resources, run the **setup** fence first. A cleanup fence for the whole set is at the bottom.
 
-```bash
-kubectl config use-context kind-cka
-k get sc    # confirm: standard (default), rancher.io/local-path, WaitForFirstConsumer
-```
+Exam-flavor note (applies to all tasks): on the real exam the backing storage is a real CSI driver (EBS, PD, Ceph…) so capacity, access modes, and expansion are physically enforced; on kind, `rancher.io/local-path` is node-local hostPath, so some limits are matching-only. Where behavior differs, each solution says so in one line.
 
-Each task states its namespace. Cleanup after a task: `k delete ns <ns>` plus any cluster-scoped PVs/SCs the solution names. Exam-flavor notes mark where the real exam (kubeadm nodes, SSH, sudo) differs from kind (`docker exec`).
+There are **15 tasks** (4 hard-mode). Do them in order — later tasks assume you can write the shapes from the earlier ones without docs.
 
 ---
 
-## Tasks
+## Task 1 — configMap as a read-only volume (warmup, 4 min)
 
-### Task 1 — Static binding chain (warmup, 6 min)
-
-Context: namespace `t1-static` (create it). Nothing pre-exists.
-
-Create a PersistentVolume `pv-app-logs`: 1Gi, `ReadWriteOnce`, `storageClassName: manual`, hostPath `/tmp/app-logs` (create the directory if absent), reclaim policy `Retain`. Create a PersistentVolumeClaim `app-logs` in `t1-static` that binds to it. Create a pod `writer` (image `busybox:1.36`, command `sleep 3600`) mounting the claim at `/logs`. Verify the PV and PVC are `Bound` and write a file into `/logs`.
-
-### Task 2 — hostPath read-only (warmup, 4 min)
-
-Context: namespace `default`. Nothing pre-exists.
-
-Create a pod `log-reader` (image `busybox:1.36`, command `sleep 3600`) that mounts the node directory `/var/log` at `/host-logs`, read-only, with a hostPath type that fails fast if the directory does not exist. Verify you can list `/host-logs` but cannot create a file there.
-
-### Task 3 — Fix the binding mismatch (exam, 8 min)
-
-Context: namespace `t3-mismatch`. Run the setup first.
+Setup:
 
 ```bash
-k create ns t3-mismatch
-k apply -f - <<'EOF'
+k create ns storage-lab
+k -n storage-lab create configmap app-cfg \
+  --from-literal=color=blue \
+  --from-literal=application.properties='mode=prod'
+```
+
+Context: namespace `storage-lab`, configMap `app-cfg` exists. Create a pod `cfg-reader` (image `busybox:1.36`, command `sleep 3600`) that mounts `app-cfg` at `/etc/app` **read-only**. Verify the file `application.properties` is visible inside the container and that the mount is read-only (a write attempt fails).
+
+## Task 2 — emptyDir RAM cache with a size limit (warmup, 4 min)
+
+Context: namespace `storage-lab`. Create a pod `ram-cache` (image `busybox:1.36`, `sleep 3600`) with a **memory-backed** emptyDir mounted at `/cache`, `sizeLimit` 64Mi, and a container memory limit of 128Mi. Confirm from inside the pod that `/cache` is a tmpfs. State (to yourself) which limit the tmpfs bytes count against.
+
+## Task 3 — hostPath mounted read-only (warmup, 3 min)
+
+Context: namespace `storage-lab`. Create a pod `host-reader` (image `busybox:1.36`, `sleep 3600`) that mounts the node directory `/var/log` at `/host-logs` **read-only**, using a `hostPath` `type` that fails fast if the directory does not already exist. Verify you can read but not write.
+
+## Task 4 — static PV + PVC + pod binding chain (exam, 7 min)
+
+Context: namespace `storage-lab`. A default StorageClass exists, so you must bind statically on purpose. Create:
+
+1. A PersistentVolume `pv-manual-2g`, 2Gi, `ReadWriteOnce`, reclaim `Retain`, `storageClassName: manual`, hostPath `/mnt/data/pv-manual-2g` (`DirectoryOrCreate`).
+2. A PersistentVolumeClaim `claim-1g` in `storage-lab` requesting 1Gi RWO from `storageClassName: manual`.
+3. A pod `pv-user` (image `nginx:1.27`) mounting the PVC at `/usr/share/nginx/html`.
+
+Verify the PV shows `Bound` to `claim-1g` and the pod runs.
+
+## Task 5 — diagnose and fix a Pending PVC (exam, 6 min)
+
+Setup:
+
+```bash
+k -n storage-lab apply -f - <<'EOF'
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: pv-t3
+  name: pv-fix-1g
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /mnt/data/pv-fix-1g
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: broken-claim
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: slow
+  resources:
+    requests:
+      storage: 5Gi
+EOF
+```
+
+Context: PV `pv-fix-1g` is `Available`; PVC `broken-claim` is `Pending`. Without changing the PV, make `broken-claim` bind to `pv-fix-1g`. Name every reason it was Pending. (Hint: think about which PVC fields you can and cannot edit in place.)
+
+## Task 6 — create a StorageClass (exam, 4 min)
+
+Context: nothing pre-exists. Create a StorageClass `fast` with provisioner `rancher.io/local-path`, reclaim policy `Delete`, `allowVolumeExpansion: true`, and binding mode `WaitForFirstConsumer`. Do **not** make it the default. Verify it appears in `k get sc` without a `(default)` marker.
+
+## Task 7 — switch the default StorageClass (exam, 4 min)
+
+Context: `standard` is currently the default; `fast` exists from Task 6. Make `fast` the default and ensure `standard` is no longer default. Prove that exactly one class shows `(default)`. Then create a PVC `default-test` in `storage-lab` with **no** `storageClassName` and confirm it picked up `fast`.
+
+## Task 8 — WaitForFirstConsumer observation drill (exam, 5 min)
+
+Context: namespace `storage-lab`, default class is WFFC. Create a PVC `wffc` (1Gi RWO, `storageClassName: standard`). Observe it stay `Pending` and read the exact event reason. Then create a pod `wffc-pod` (`busybox:1.36`, `sleep 3600`) mounting it at `/data`, and observe the PVC flip to `Bound`. Report which node the volume landed on and why the pod is pinned there.
+
+## Task 9 — expand a PVC (exam, 5 min)
+
+Setup:
+
+```bash
+k apply -f - <<'EOF'
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: expandable
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+EOF
+```
+
+Context: namespace `storage-lab`, StorageClass `expandable` allows expansion. Create a PVC `grow-me` (1Gi RWO, `storageClassName: expandable`) and a pod `grow-pod` (`busybox:1.36`, `sleep 3600`) that mounts it (needed for WFFC to bind). Once bound, grow the PVC to 3Gi. Show the updated `spec.resources.requests.storage`. Explain what you would check if the pod still reported the old size.
+
+## Task 10 — projected volume: configMap + downwardAPI (exam, 6 min)
+
+Context: namespace `storage-lab`, configMap `app-cfg` exists (Task 1). Create a pod `projected-pod` (`busybox:1.36`, `sleep 3600`) with a single **projected** volume mounted read-only at `/etc/combined` that surfaces: (a) all keys of configMap `app-cfg`, and (b) the pod's own name from the downward API as a file `pod-name`. Verify all three files are present with the right contents.
+
+## Task 11 — pod stuck ContainerCreating: missing configMap (exam, 4 min)
+
+Setup:
+
+```bash
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stuck-pod
+  namespace: storage-lab
+spec:
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: cfg
+      mountPath: /etc/cfg
+  volumes:
+  - name: cfg
+    configMap:
+      name: missing-cfg
+EOF
+```
+
+Context: `stuck-pod` is stuck in `ContainerCreating`. Diagnose from events, then make it run **without** editing the pod (it is immutable-ish for volumes). Verify it reaches `Running`.
+
+## Task 12 — Retain reclaim: release and rebind by clearing claimRef (hard, 8 min)
+
+Setup:
+
+```bash
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-retain
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /mnt/data/pv-retain
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: retain-claim-old
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+```
+
+Context: PV `pv-retain` (Retain) is `Bound` to `retain-claim-old`. Delete `retain-claim-old`. Observe the PV go to `Released` and confirm it will **not** bind a new claim in that state. Then make it `Available` again and bind a fresh PVC `retain-claim-new` (same specs) to it — **without deleting and recreating the PV**.
+
+## Task 13 — StatefulSet with volumeClaimTemplates and scale-down retention (hard, 8 min)
+
+Context: namespace `storage-lab`, default class `standard`. Create a headless Service `web` and a StatefulSet `web` (3 replicas, image `nginx:1.27`) whose `volumeClaimTemplates` gives each pod a 1Gi RWO PVC named `data`, mounted at `/usr/share/nginx/html`. Wait for all 3 pods `Running` and all 3 PVCs `Bound`. Then scale to 1 replica and report exactly which PVCs remain and why. State the two-step cleanup you'd run to remove all storage.
+
+## Task 14 — triage three Pending PVCs, each a different cause (hard, 9 min)
+
+Setup:
+
+```bash
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-a
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: does-not-exist
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-b
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-small
 spec:
   capacity:
     storage: 500Mi
-  accessModes: [ReadOnlyMany]
-  storageClassName: manual
+  accessModes: [ReadWriteOnce]
   persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
   hostPath:
-    path: /tmp/t3-data
+    path: /mnt/data/pv-small
     type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: data
-  namespace: t3-mismatch
+  name: pvc-c
+  namespace: storage-lab
 spec:
   accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi
   storageClassName: manual
-EOF
-```
-
-The PVC `data` is stuck `Pending`. Identify every reason it cannot bind to `pv-t3`, then make it bind **without deleting or recreating the PVC**. Verify both go `Bound`.
-
-### Task 4 — In-memory cache volume (exam, 6 min)
-
-Context: namespace `t4-cache` (create it).
-
-Create a pod `cache-pod` with two containers, both `busybox:1.36` running `sleep 3600`, named `writer` and `reader`. They share a memory-backed emptyDir volume `cache` mounted at `/cache` in both, capped at 64Mi. Give each container a memory limit of 128Mi. Verify: a file written in `writer` is visible in `reader`, and `/cache` is a tmpfs mount.
-
-### Task 5 — Projected volume (exam, 7 min)
-
-Context: namespace `t5-projected` (create it).
-
-Create a ConfigMap `app-config` with key `app.properties` = `mode=prod`, and a Secret `app-secret` with key `api-token` = `s3cr3t`. Create a pod `combined-pod` (image `busybox:1.36`, command `sleep 3600`, label `tier=backend`) that mounts a single projected volume at `/etc/combined` (read-only) exposing: all keys of `app-config`, all keys of `app-secret`, and the pod's labels via the downward API at file `pod-labels`. Verify all three files exist with expected content.
-
-### Task 6 — StorageClass + default switch (exam, 6 min)
-
-Context: cluster-scoped. `standard` is currently the default SC.
-
-Create a StorageClass `fast-local`: provisioner `rancher.io/local-path`, `volumeBindingMode: WaitForFirstConsumer`, `reclaimPolicy: Delete`, expansion allowed. Make `fast-local` the cluster default and ensure `standard` is no longer default. Verify with `k get sc` (exactly one `(default)` marker).
-
-### Task 7 — WFFC observation drill (exam, 5 min)
-
-Context: namespace `t7-wffc` (create it). Uses SC `standard`.
-
-Create a PVC `wffc-claim` (200Mi, RWO, class `standard`). Record its status and the exact event explaining it. Then create a pod `consumer` (image `busybox:1.36`, `sleep 3600`) mounting the claim at `/data`, and watch the PVC go `Bound`. Answer in one sentence: which StorageClass field caused the initial Pending, and why does that field exist?
-
-### Task 8 — Expand a PVC (exam, 8 min)
-
-Context: namespace `t8-expand` (create it). Uses SC `standard`.
-
-Create PVC `data-grow` (1Gi, RWO, class `standard`) and a pod `grow-pod` mounting it at `/data` (so it provisions). Then expand the claim to 2Gi. Show where the new size is visible and where it is not, and explain the gap.
-
-Exam-flavor note: kind's local-path provisioner cannot resize; the API accepts the request but `status.capacity` never converges. On the exam's CSI-backed clusters the same steps complete, possibly with a `FileSystemResizePending` condition until the pod remounts.
-
-### Task 9 — Retain, release, rebind (hard, 12 min)
-
-Context: namespace `t9-retain` (create it). Uses SC `standard`.
-
-1. Create PVC `keep-data` (500Mi, RWO, class `standard`) and pod `producer` (busybox) mounting it at `/data`; write `important` into `/data/marker.txt`.
-2. Protect the provisioned PV from deletion, then delete the pod AND the PVC.
-3. Prove the PV survived and reached `Released`, and that the data is still on the node.
-4. Make the PV bindable again, bind it to a NEW PVC `keep-data-2` in the same namespace, and mount it from pod `consumer2` to read `/data/marker.txt`. The file must still say `important`.
-
-### Task 10 — local PV with node affinity (exam, 8 min)
-
-Context: namespace `t10-local`. Run the setup first (pre-creates the disk directory on `cka-worker2`).
-
-```bash
-k create ns t10-local
-docker exec cka-worker2 mkdir -p /mnt/disks/ssd1
-```
-
-Create a StorageClass `local-disks` (`kubernetes.io/no-provisioner`, WaitForFirstConsumer). Create a PV `pv-local-ssd`: 500Mi, RWO, class `local-disks`, reclaim `Retain`, **local** volume source at `/mnt/disks/ssd1`, required node affinity to `cka-worker2`. Create PVC `local-claim` (400Mi, RWO, class `local-disks`) and pod `pinned` (busybox, `sleep 3600`) mounting it at `/disk` — WITHOUT any nodeSelector/affinity on the pod. Verify the pod was scheduled on `cka-worker2` and explain in one sentence what put it there.
-
-Exam-flavor note: on the exam you'd `ssh node01` and `sudo mkdir` instead of `docker exec`.
-
-### Task 11 — StatefulSet with volumeClaimTemplates (exam, 8 min)
-
-Context: namespace `t11-sts` (create it). Uses SC `standard`.
-
-Create a headless Service `web` and a StatefulSet `web`: 3 replicas, image `nginx:1.27`, one volumeClaimTemplate `www` (100Mi, RWO, class `standard`) mounted at `/usr/share/nginx/html`. Once all replicas run: write a distinct marker file into replica 2's volume, scale the StatefulSet to 1, list the PVCs and state what happened to them, scale back to 3, and verify replica 2 still has its marker.
-
-### Task 12 — PVC Pending: missing class (hard, 6 min)
-
-Context: namespace `t12-diag`. Run the setup first, then treat it as a live incident.
-
-```bash
-k create ns t12-diag
-k apply -f - <<'EOF'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: web-data
-  namespace: t12-diag
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 500Mi
-  storageClassName: gold
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: web
-  namespace: t12-diag
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: web
-  template:
-    metadata:
-      labels:
-        app: web
-    spec:
-      containers:
-      - name: web
-        image: nginx:1.27
-        volumeMounts:
-        - name: data
-          mountPath: /usr/share/nginx/html
-      volumes:
-      - name: data
-        persistentVolumeClaim:
-          claimName: web-data
-EOF
-```
-
-The `web` deployment in `t12-diag` has no running pods. Find the root cause and fix it **without deleting or modifying the PVC or the Deployment**. Everything must reach `Running`/`Bound`.
-
-### Task 13 — PVC Pending: triple mismatch (hard, 10 min)
-
-Context: namespace `t13-diag`. Run the setup first.
-
-```bash
-k create ns t13-diag
-k apply -f - <<'EOF'
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pv-t13
-spec:
-  capacity:
-    storage: 1Gi
-  accessModes: [ReadWriteOnce]
-  volumeMode: Block
-  persistentVolumeReclaimPolicy: Retain
-  hostPath:
-    path: /tmp/t13-data
-    type: DirectoryOrCreate
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: shared
-  namespace: t13-diag
-spec:
-  accessModes: [ReadWriteMany]
-  volumeMode: Filesystem
   resources:
     requests:
       storage: 2Gi
-  storageClassName: ""
 EOF
 ```
 
-PVC `shared` is `Pending` and must bind to `pv-t13` (do not create other PVs; do not touch the PVC). List EVERY rule that currently blocks the binding, then fix the PV side. One of the mismatches cannot be patched in place — handle it correctly. Verify `Bound`.
+Context: three PVCs (`pvc-a`, `pvc-b`, `pvc-c`) are all `Pending` for **different** reasons. For each: state the exact cause from `describe`, then fix it so all three become `Bound` (create supporting objects as needed). Do not weaken the `pv-small` capacity.
 
-### Task 14 — ContainerCreating: FailedMount (hard, 8 min)
+## Task 15 — local PV with nodeAffinity vs hostPath (hard, 8 min)
 
-Context: namespace `t14-diag`. Run the setup first, then diagnose.
-
-```bash
-k create ns t14-diag
-k apply -f - <<'EOF'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: site-data
-  namespace: t14-diag
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 200Mi
-  storageClassName: standard
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: site
-  namespace: t14-diag
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: site
-  template:
-    metadata:
-      labels:
-        app: site
-    spec:
-      containers:
-      - name: nginx
-        image: nginx:1.27
-        volumeMounts:
-        - name: data
-          mountPath: /usr/share/nginx/html
-        - name: conf
-          mountPath: /etc/nginx/conf.d
-      volumes:
-      - name: data
-        persistentVolumeClaim:
-          claimName: site-data
-      - name: conf
-        configMap:
-          name: site-conf
-EOF
-```
-
-The `site` pod in `t14-diag` never reaches `Running`. The team already "checked the PVC and it's fine". Find the actual root cause with evidence from events, fix it minimally, and get the pod `Running`.
+Context: namespace `storage-lab`. Create a StorageClass `local-storage` (`kubernetes.io/no-provisioner`, `WaitForFirstConsumer`). Create a `local` PersistentVolume `pv-local-w2`, 2Gi RWO, `storageClassName: local-storage`, `local.path: /mnt/disks/ssd1`, with **required nodeAffinity** pinning it to node `cka-worker2`. Create a PVC `local-claim` and a pod `local-pod` (`busybox:1.36`, `sleep 3600`) that mounts it. Confirm the pod is scheduled specifically on `cka-worker2` and explain why `hostPath` could not have guaranteed that.
 
 ---
 
-## SOLUTIONS
+# SOLUTIONS
 
-### Solution 1 — Static binding chain
-
-Fastest route: docs page "Configure a Pod to Use a PersistentVolume for Storage" has all three objects; adjust names. Full manifests:
-
-```bash
-k create ns t1-static
-```
-
-```yaml
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pv-app-logs
-spec:
-  capacity:
-    storage: 1Gi
-  accessModes: [ReadWriteOnce]
-  storageClassName: manual
-  persistentVolumeReclaimPolicy: Retain
-  hostPath:
-    path: /tmp/app-logs
-    type: DirectoryOrCreate
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: app-logs
-  namespace: t1-static
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi
-  storageClassName: manual
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: writer
-  namespace: t1-static
-spec:
-  containers:
-  - name: writer
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    volumeMounts:
-    - name: logs
-      mountPath: /logs
-  volumes:
-  - name: logs
-    persistentVolumeClaim:
-      claimName: app-logs
-```
-
-```bash
-k get pv pv-app-logs                      # Bound
-k get pvc -n t1-static                    # Bound to pv-app-logs
-k exec -n t1-static writer -- sh -c 'echo hi > /logs/test && cat /logs/test'
-```
-
-Why: class `manual` + capacity + RWO satisfy all five binding rules, so the PV controller binds them; no SC object named `manual` is needed for static matching.
-
-### Solution 2 — hostPath read-only
-
-"Fails fast if absent" = `type: Directory`. Read-only is a volumeMount property, not an accessMode.
+## Solution 1 — configMap as a read-only volume
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: log-reader
-  namespace: default
+  name: cfg-reader
+  namespace: storage-lab
 spec:
   containers:
-  - name: reader
+  - name: app
     image: busybox:1.36
     command: ["sleep", "3600"]
     volumeMounts:
-    - name: varlog
-      mountPath: /host-logs
+    - name: cfg
+      mountPath: /etc/app
       readOnly: true
   volumes:
-  - name: varlog
-    hostPath:
-      path: /var/log
-      type: Directory
+  - name: cfg
+    configMap:
+      name: app-cfg
 ```
 
 ```bash
-k exec log-reader -- ls /host-logs                       # works
-k exec log-reader -- touch /host-logs/x                  # "Read-only file system"
+k apply -f cfg-reader.yaml
+k -n storage-lab exec cfg-reader -- cat /etc/app/application.properties   # mode=prod
+k -n storage-lab exec cfg-reader -- sh -c 'echo x > /etc/app/color' 2>&1   # Read-only file system
 ```
 
-Why: `readOnly: true` on the mount enforces read-only; `type: Directory` makes kubelet refuse the mount (loud FailedMount) instead of silently creating an empty dir.
+Why: configMap volumes surface each key as a file; `readOnly: true` on the **mount** (configMap volumes are read-only anyway, but stating it satisfies the "read-only" ask and blocks writes).
 
-### Solution 3 — Fix the binding mismatch
-
-Diagnose:
-
-```bash
-k describe pvc data -n t3-mismatch | tail -5
-k get pv pv-t3 -o custom-columns=CAP:.spec.capacity.storage,MODES:.spec.accessModes,CLASS:.spec.storageClassName
-```
-
-Two blockers: PV capacity 500Mi < requested 1Gi, and PV modes `[ReadOnlyMany]` do not include the requested `ReadWriteOnce`. Class matches. PVC is immutable in both fields, so patch the PV (both fields are mutable on an unbound PV):
-
-```bash
-k patch pv pv-t3 --type merge -p '{"spec":{"capacity":{"storage":"1Gi"},"accessModes":["ReadWriteOnce"]}}'
-k get pvc -n t3-mismatch -w      # Bound within ~15s (binder retry loop)
-```
-
-Why: binding requires PV capacity >= request AND PV accessModes ⊇ PVC accessModes; fixing the PV side is the only option when the PVC must survive.
-
-### Solution 4 — In-memory cache volume
+## Solution 2 — emptyDir RAM cache with a size limit
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: cache-pod
-  namespace: t4-cache
+  name: ram-cache
+  namespace: storage-lab
 spec:
   containers:
-  - name: writer
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    resources:
-      limits:
-        memory: 128Mi
-    volumeMounts:
-    - name: cache
-      mountPath: /cache
-  - name: reader
+  - name: app
     image: busybox:1.36
     command: ["sleep", "3600"]
     resources:
@@ -416,30 +304,267 @@ spec:
 ```
 
 ```bash
-k create ns t4-cache && k apply -f cache-pod.yaml
-k exec -n t4-cache cache-pod -c writer -- sh -c 'echo v1 > /cache/entry'
-k exec -n t4-cache cache-pod -c reader -- cat /cache/entry        # v1
-k exec -n t4-cache cache-pod -c reader -- sh -c 'mount | grep /cache'   # tmpfs
+k apply -f ram-cache.yaml
+k -n storage-lab exec ram-cache -- mount | grep /cache    # tmpfs ... on /cache
 ```
 
-Why: `medium: Memory` = tmpfs shared across the pod's containers; the limit matters because tmpfs bytes are charged to container memory.
+Why: `medium: Memory` makes the emptyDir a tmpfs; its bytes count **against the container's 128Mi memory limit** (not disk), so oversizing the cache can OOM-kill the container.
 
-### Solution 5 — Projected volume
-
-```bash
-k create ns t5-projected
-k create configmap app-config -n t5-projected --from-literal=app.properties=mode=prod
-k create secret generic app-secret -n t5-projected --from-literal=api-token=s3cr3t
-```
+## Solution 3 — hostPath mounted read-only
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: combined-pod
-  namespace: t5-projected
-  labels:
-    tier: backend
+  name: host-reader
+  namespace: storage-lab
+spec:
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: logs
+      mountPath: /host-logs
+      readOnly: true
+  volumes:
+  - name: logs
+    hostPath:
+      path: /var/log
+      type: Directory
+```
+
+```bash
+k apply -f host-reader.yaml
+k -n storage-lab exec host-reader -- ls /host-logs
+k -n storage-lab exec host-reader -- sh -c 'touch /host-logs/x' 2>&1   # Read-only file system
+```
+
+Why: `type: Directory` fails the mount if `/var/log` is absent (fail-fast); `readOnly: true` on the mount enforces read-only.
+
+## Solution 4 — static PV + PVC + pod binding chain
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-manual-2g
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /mnt/data/pv-manual-2g
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claim-1g
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pv-user
+  namespace: storage-lab
+spec:
+  containers:
+  - name: web
+    image: nginx:1.27
+    volumeMounts:
+    - name: data
+      mountPath: /usr/share/nginx/html
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: claim-1g
+```
+
+```bash
+k apply -f task4.yaml
+k get pv pv-manual-2g            # STATUS Bound, CLAIM storage-lab/claim-1g
+k -n storage-lab get pvc,pod
+```
+
+Why: `storageClassName: manual` names a class with **no** dynamic provisioner object, so no dynamic provisioning happens; the PVC waits for and binds the static PV of the same class name. 1Gi ≤ 2Gi and RWO ⊆ RWO satisfy the binding rules. (Equivalent alternative: `storageClassName: ""` on both — empty string also blocks the default class from being injected.)
+
+## Solution 5 — diagnose and fix a Pending PVC
+
+```bash
+k -n storage-lab describe pvc broken-claim
+# no volume matches: wants RWX (PV offers RWO), class 'slow' (PV is 'manual'), 5Gi (PV is 1Gi)
+```
+
+Three mismatches: **access mode** (RWX ⊄ RWO), **storageClassName** (`slow` ≠ `manual`), **capacity** (5Gi > 1Gi). All three are **immutable** on a PVC (accessModes and storageClassName can't be edited; storage can only grow), so you cannot `k edit` your way out — delete and recreate:
+
+```bash
+k -n storage-lab delete pvc broken-claim
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: broken-claim
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+k get pv pv-fix-1g              # Bound to storage-lab/broken-claim
+```
+
+Why: PVC spec fields (except growing `requests.storage`) are immutable after creation, so a mismatched Pending PVC is fixed by recreating it to match the PV — not by editing it.
+
+## Solution 6 — create a StorageClass
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+```
+
+```bash
+k apply -f fast-sc.yaml
+k get sc      # 'fast' present, no (default) next to it
+```
+
+Why: omitting the `is-default-class` annotation keeps it non-default; the four fields (provisioner, reclaimPolicy, allowVolumeExpansion, volumeBindingMode) are the exam-relevant knobs.
+
+## Solution 7 — switch the default StorageClass
+
+```bash
+k patch storageclass standard -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+k patch storageclass fast     -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+k get sc      # only 'fast (default)'
+
+k -n storage-lab create -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: default-test
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+k -n storage-lab get pvc default-test -o jsonpath='{.spec.storageClassName}'   # fast
+```
+
+Why: the default is decided solely by the annotation; a PVC with the field **omitted** gets the current default's name stamped in by the DefaultStorageClass admission controller at creation time. Reset `standard` to default afterward if later tasks assume it (`k patch storageclass standard ...=true` and `fast ...=false`).
+
+## Solution 8 — WaitForFirstConsumer observation drill
+
+```bash
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wffc
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+k -n storage-lab describe pvc wffc | grep -A2 Events
+# "waiting for first consumer to be created before binding"
+
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wffc-pod
+  namespace: storage-lab
+spec:
+  containers:
+  - name: c
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: d
+      mountPath: /data
+  volumes:
+  - name: d
+    persistentVolumeClaim:
+      claimName: wffc
+EOF
+k -n storage-lab get pvc wffc     # now Bound
+k -n storage-lab get pod wffc-pod -o wide          # NODE = where the volume was provisioned
+k get pv -o custom-columns=NAME:.metadata.name,NODE:'.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]'
+```
+
+Why: WFFC defers provisioning until the scheduler picks a node; the `local-path` PV is then created on that node with matching nodeAffinity, which **pins** the pod there. Before the pod existed, the PVC had nothing to bind to — hence Pending, by design.
+
+## Solution 9 — expand a PVC
+
+```bash
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grow-me
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: expandable
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: grow-pod
+  namespace: storage-lab
+spec:
+  containers:
+  - name: c
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: d
+      mountPath: /data
+  volumes:
+  - name: d
+    persistentVolumeClaim:
+      claimName: grow-me
+EOF
+k -n storage-lab get pvc grow-me                    # wait for Bound
+k -n storage-lab patch pvc grow-me -p '{"spec":{"resources":{"requests":{"storage":"3Gi"}}}}'
+k -n storage-lab get pvc grow-me -o jsonpath='{.spec.resources.requests.storage}'   # 3Gi
+```
+
+Why: expansion needs `allowVolumeExpansion: true` on the class and a grow-only edit to the PVC. If the pod still shows the old size, `k describe pvc grow-me` for a `FileSystemResizePending` condition and restart the pod so the filesystem is grown; watch `status.capacity`.
+Exam-flavor note: kind's `local-path` does not physically resize node-local dirs, so `status.capacity` stays 1Gi on the lab — a real CSI driver moves it to 3Gi. The command sequence is identical.
+
+## Solution 10 — projected volume: configMap + downwardAPI
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: projected-pod
+  namespace: storage-lab
 spec:
   containers:
   - name: app
@@ -454,326 +579,86 @@ spec:
     projected:
       sources:
       - configMap:
-          name: app-config
-      - secret:
-          name: app-secret
+          name: app-cfg
       - downwardAPI:
           items:
-          - path: pod-labels
+          - path: pod-name
             fieldRef:
-              fieldPath: metadata.labels
+              fieldPath: metadata.name
 ```
 
 ```bash
-k exec -n t5-projected combined-pod -- ls /etc/combined
-# api-token  app.properties  pod-labels
-k exec -n t5-projected combined-pod -- cat /etc/combined/pod-labels   # tier="backend"
+k apply -f projected-pod.yaml
+k -n storage-lab exec projected-pod -- ls /etc/combined      # application.properties  color  pod-name
+k -n storage-lab exec projected-pod -- cat /etc/combined/pod-name   # projected-pod
 ```
 
-Why: `projected` merges multiple sources under one mount point — the docs page "Projected Volumes" has this exact structure to copy.
+Why: `projected` merges heterogeneous sources under one mount; `downwardAPI` with `fieldRef: metadata.name` writes the pod name to the file `pod-name`, alongside the configMap keys.
 
-### Solution 6 — StorageClass + default switch
-
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: fast-local
-provisioner: rancher.io/local-path
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: true
-```
+## Solution 11 — pod stuck ContainerCreating: missing configMap
 
 ```bash
-k apply -f fast-local.yaml
-k patch sc fast-local -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
-k patch sc standard -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
-k get sc      # only fast-local shows (default)
+k -n storage-lab describe pod stuck-pod | grep -A3 Events
+# MountVolume.SetUp failed ... configmap "missing-cfg" not found
+
+# fix: create the referenced configMap (the pod's volume names it)
+k -n storage-lab create configmap missing-cfg --from-literal=key=value
+k -n storage-lab get pod stuck-pod -w      # ContainerCreating -> Running
 ```
 
-Why: default-ness is only the `storageclass.kubernetes.io/is-default-class` annotation; both patches are needed because Kubernetes will not un-default the old class for you. (Restore `standard` as default after the task if you want the lab pristine.)
+Why: a pod mounting a nonexistent configMap hangs in ContainerCreating until the object appears; the kubelet retries the mount, so creating `missing-cfg` unblocks it with no pod edit. (Alternative: delete the pod and recreate it referencing an existing configMap — but creating the missing object is faster and non-destructive.)
 
-### Solution 7 — WFFC observation drill
+## Solution 12 — Retain reclaim: release and rebind by clearing claimRef
 
 ```bash
-k create ns t7-wffc
-k apply -f - <<'EOF'
+k -n storage-lab delete pvc retain-claim-old
+k get pv pv-retain                       # STATUS: Released (NOT Available)
+
+# prove it won't rebind while Released: a new matching PVC stays Pending
+k -n storage-lab apply -f - <<'EOF'
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: wffc-claim
-  namespace: t7-wffc
+  name: retain-claim-new
+  namespace: storage-lab
 spec:
   accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 200Mi
-  storageClassName: standard
-EOF
-k get pvc -n t7-wffc                       # STATUS: Pending — expected
-k describe pvc wffc-claim -n t7-wffc | tail -3
-# Event: WaitForFirstConsumer  waiting for first consumer to be created before binding
-k run consumer -n t7-wffc --image=busybox:1.36 $do -- sleep 3600 > /tmp/consumer.yaml
-# add the volume stanza, then:
-k apply -f /tmp/consumer.yaml
-k get pvc -n t7-wffc -w                    # Pending -> Bound once the pod schedules
-```
-
-Consumer pod volume stanza (complete pod for reference):
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: consumer
-  namespace: t7-wffc
-spec:
-  containers:
-  - name: consumer
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    volumeMounts:
-    - name: data
-      mountPath: /data
-  volumes:
-  - name: data
-    persistentVolumeClaim:
-      claimName: wffc-claim
-```
-
-Answer: `volumeBindingMode: WaitForFirstConsumer` — provisioning is deferred until the scheduler places a consuming pod, so topology-constrained storage (node-local, zonal) is created where the pod actually runs.
-
-### Solution 8 — Expand a PVC
-
-```bash
-k create ns t8-expand
-k apply -f - <<'EOF'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: data-grow
-  namespace: t8-expand
-spec:
-  accessModes: [ReadWriteOnce]
+  storageClassName: manual
   resources:
     requests:
       storage: 1Gi
-  storageClassName: standard
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: grow-pod
-  namespace: t8-expand
-spec:
-  containers:
-  - name: app
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    volumeMounts:
-    - name: data
-      mountPath: /data
-  volumes:
-  - name: data
-    persistentVolumeClaim:
-      claimName: data-grow
 EOF
-k get pvc -n t8-expand -w                 # wait for Bound
-# Prerequisite: standard has allowVolumeExpansion=false -> the resize would be rejected
-k patch sc standard -p '{"allowVolumeExpansion":true}'
-k patch pvc data-grow -n t8-expand -p '{"spec":{"resources":{"requests":{"storage":"2Gi"}}}}'
-k get pvc data-grow -n t8-expand -o jsonpath='{.spec.resources.requests.storage} vs {.status.capacity.storage}{"\n"}'
-# 2Gi vs 1Gi
-k describe pvc data-grow -n t8-expand | tail -5     # waiting-for-external-resize style events
+k -n storage-lab get pvc retain-claim-new       # Pending (PV is Released, has stale claimRef)
+
+# clear the stale binding so the PV returns to Available
+k patch pv pv-retain -p '{"spec":{"claimRef":null}}'
+k get pv pv-retain                       # Available
+k -n storage-lab get pvc retain-claim-new       # now Bound
 ```
 
-Where visible: `spec.resources.requests.storage` = 2Gi (accepted). Where not: `status.capacity` stays 1Gi — local-path has no resizer, so nothing ever performs the resize. Why: expansion needs BOTH the SC flag (API gate) and a driver capable of resizing (execution); on a CSI cluster status converges. Cleanup: `k patch sc standard -p '{"allowVolumeExpansion":false}'` if you want the lab default back.
+Why: with `Retain`, deleting the PVC leaves the PV `Released` with a `claimRef` still naming the old (deleted) claim UID — that stale ref blocks any new binding. Patching `claimRef` to `null` returns it to `Available` without touching the on-disk data.
 
-### Solution 9 — Retain, release, rebind
-
-```bash
-k create ns t9-retain
-k apply -f - <<'EOF'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: keep-data
-  namespace: t9-retain
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 500Mi
-  storageClassName: standard
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: producer
-  namespace: t9-retain
-spec:
-  containers:
-  - name: app
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    volumeMounts:
-    - name: data
-      mountPath: /data
-  volumes:
-  - name: data
-    persistentVolumeClaim:
-      claimName: keep-data
-EOF
-k wait -n t9-retain --for=condition=Ready pod/producer --timeout=120s
-k exec -n t9-retain producer -- sh -c 'echo important > /data/marker.txt'
-
-# 2. protect, then delete consumer and claim
-PV=$(k get pvc keep-data -n t9-retain -o jsonpath='{.spec.volumeName}')
-k patch pv "$PV" -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
-k delete pod producer -n t9-retain $now
-k delete pvc keep-data -n t9-retain
-
-# 3. survived + data intact
-k get pv "$PV"                                    # STATUS: Released (Delete would have destroyed it)
-NODE=$(k get pv "$PV" -o jsonpath='{.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}')
-docker exec "$NODE" sh -c 'cat /var/local-path-provisioner/*/marker.txt'   # important
-
-# 4. free the claimRef, rebind explicitly
-k patch pv "$PV" --type json -p '[{"op":"remove","path":"/spec/claimRef"}]'
-k get pv "$PV"                                    # STATUS: Available
-k apply -f - <<EOF
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: keep-data-2
-  namespace: t9-retain
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 500Mi
-  storageClassName: standard
-  volumeName: $PV
-EOF
-k get pvc keep-data-2 -n t9-retain                # Bound to the same PV
-```
-
-Consumer pod to verify:
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: consumer2
-  namespace: t9-retain
-spec:
-  containers:
-  - name: app
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    volumeMounts:
-    - name: data
-      mountPath: /data
-  volumes:
-  - name: data
-    persistentVolumeClaim:
-      claimName: keep-data-2
-```
-
-```bash
-k exec -n t9-retain consumer2 -- cat /data/marker.txt    # important
-```
-
-Why: Retain keeps PV + data after PVC deletion, but the stale `claimRef` (dead PVC's UID) blocks rebinding until removed; `volumeName` pre-binds the new claim so the provisioner doesn't create a fresh volume instead. Cleanup is manual by design: `k delete pv "$PV"` plus the data dir on the node. Exam-flavor: node inspection is `ssh <node>` + `sudo ls /var/...`, not `docker exec`.
-
-### Solution 10 — local PV with node affinity
-
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: local-disks
-provisioner: kubernetes.io/no-provisioner
-volumeBindingMode: WaitForFirstConsumer
----
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pv-local-ssd
-spec:
-  capacity:
-    storage: 500Mi
-  accessModes: [ReadWriteOnce]
-  storageClassName: local-disks
-  persistentVolumeReclaimPolicy: Retain
-  local:
-    path: /mnt/disks/ssd1
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: kubernetes.io/hostname
-          operator: In
-          values: [cka-worker2]
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: local-claim
-  namespace: t10-local
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 400Mi
-  storageClassName: local-disks
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: pinned
-  namespace: t10-local
-spec:
-  containers:
-  - name: app
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    volumeMounts:
-    - name: disk
-      mountPath: /disk
-  volumes:
-  - name: disk
-    persistentVolumeClaim:
-      claimName: local-claim
-```
-
-```bash
-k get pod pinned -n t10-local -o wide      # NODE: cka-worker2
-```
-
-Why: with WFFC the scheduler resolves pod placement and volume binding together, and the PV's mandatory `nodeAffinity` leaves `cka-worker2` as the only node where the claim is satisfiable — no pod-level selector needed. (`nodeAffinity` is required on `local:` PVs; the API rejects one without it.)
-
-### Solution 11 — StatefulSet with volumeClaimTemplates
+## Solution 13 — StatefulSet with volumeClaimTemplates and scale-down retention
 
 ```yaml
 apiVersion: v1
 kind: Service
 metadata:
   name: web
-  namespace: t11-sts
+  namespace: storage-lab
 spec:
   clusterIP: None
   selector:
     app: web
   ports:
   - port: 80
+    name: http
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: web
-  namespace: t11-sts
+  namespace: storage-lab
 spec:
   serviceName: web
   replicas: 3
@@ -788,120 +673,186 @@ spec:
       containers:
       - name: nginx
         image: nginx:1.27
+        ports:
+        - containerPort: 80
         volumeMounts:
-        - name: www
+        - name: data
           mountPath: /usr/share/nginx/html
   volumeClaimTemplates:
   - metadata:
-      name: www
+      name: data
     spec:
       accessModes: [ReadWriteOnce]
       storageClassName: standard
       resources:
         requests:
-          storage: 100Mi
+          storage: 1Gi
 ```
 
 ```bash
-k create ns t11-sts && k apply -f web-sts.yaml
-k rollout status sts/web -n t11-sts
-k get pvc -n t11-sts                       # www-web-0, www-web-1, www-web-2 — all Bound
-k exec -n t11-sts web-2 -- sh -c 'echo replica2 > /usr/share/nginx/html/marker'
-k scale sts web -n t11-sts --replicas=1
-k get pvc -n t11-sts                       # still all 3, still Bound — scale-down retains PVCs
-k scale sts web -n t11-sts --replicas=3
-k rollout status sts/web -n t11-sts
-k exec -n t11-sts web-2 -- cat /usr/share/nginx/html/marker   # replica2
+k apply -f web-sts.yaml
+k -n storage-lab rollout status statefulset/web
+k -n storage-lab get pvc     # data-web-0, data-web-1, data-web-2 all Bound
+
+k -n storage-lab scale statefulset web --replicas=1
+k -n storage-lab get pods    # only web-0
+k -n storage-lab get pvc     # data-web-0, data-web-1, data-web-2 ALL still Bound
 ```
 
-Why: PVCs from volumeClaimTemplates are named `<template>-<sts>-<ordinal>` and deliberately survive scale-down so returning ordinals re-attach to their data; deletion is opt-in via `persistentVolumeClaimRetentionPolicy` (GA on recent versions).
+Why: `volumeClaimTemplates` creates one PVC per ordinal (`data-web-N`); the default `persistentVolumeClaimRetentionPolicy` is `Retain` for both `whenScaled` and `whenDeleted`, so scaling down keeps `data-web-1`/`data-web-2` intact for a scale-up. Full cleanup is two steps: `k -n storage-lab delete statefulset web` then `k -n storage-lab delete pvc -l app=web` (or the PVCs by name).
 
-### Solution 12 — PVC Pending: missing class
+## Solution 14 — triage three Pending PVCs
 
 ```bash
-k get pods -n t12-diag                      # Pending
-k describe pod -n t12-diag -l app=web | tail -5
-# ...pod has unbound immediate PersistentVolumeClaims
-k describe pvc web-data -n t12-diag | tail -3
-# ProvisioningFailed: storageclass.storage.k8s.io "gold" not found
-k get sc                                    # no gold
+k -n storage-lab describe pvc pvc-a pvc-b pvc-c | grep -E 'Name:|Events|not found|volume|waiting'
 ```
 
-Root cause: the PVC references StorageClass `gold`, which does not exist. `storageClassName` is immutable and the PVC must not be touched — so create the class:
+| PVC | Cause | Fix |
+|---|---|---|
+| `pvc-a` | `storageClassName: does-not-exist` → `storageclass ... not found`, no provisioning | recreate with `storageClassName: standard` (or create that class) |
+| `pvc-b` | `storageClassName: ""` disables dynamic provisioning and there is no static PV with `""` to bind | create a matching static PV with `storageClassName: ""` |
+| `pvc-c` | requests 2Gi but the only `manual` PV (`pv-small`) is 500Mi → capacity mismatch | recreate `pvc-c` requesting ≤ 500Mi |
+
+```bash
+# pvc-a
+k -n storage-lab delete pvc pvc-a
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-a
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+k -n storage-lab run pvc-a-user --image=busybox:1.36 \
+  --overrides='{"spec":{"containers":[{"name":"c","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"d","mountPath":"/data"}]}],"volumes":[{"name":"d","persistentVolumeClaim":{"claimName":"pvc-a"}}]}}' \
+  --command -- sleep 3600      # WFFC needs a consumer to bind
+
+# pvc-b: give it a static PV with empty-string class
+k apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-empty-class
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /mnt/data/pv-empty-class
+    type: DirectoryOrCreate
+EOF
+
+# pvc-c: recreate within the 500Mi PV capacity
+k -n storage-lab delete pvc pvc-c
+k -n storage-lab apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-c
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 500Mi
+EOF
+k -n storage-lab get pvc      # pvc-b and pvc-c Bound; pvc-a Bound after its consumer schedules
+```
+
+Why: three distinct Pending causes — a **named class that doesn't exist** (no provisioner, no static PV), an **empty-string class** (static-only, no matching PV), and a **capacity request exceeding** the only matching PV. Each needs a different remedy; `pvc-a` on the WFFC default also needs a consuming pod before it binds.
+
+## Solution 15 — local PV with nodeAffinity vs hostPath
 
 ```yaml
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: gold
-provisioner: rancher.io/local-path
-reclaimPolicy: Delete
+  name: local-storage
+provisioner: kubernetes.io/no-provisioner
 volumeBindingMode: WaitForFirstConsumer
-```
-
-```bash
-k apply -f gold-sc.yaml
-k get pvc,pods -n t12-diag -w      # PVC Bound (the pending pod is the "first consumer"), pod Running
-```
-
-Why: creating the missing class un-blocks dynamic provisioning; the already-Pending pod acts as the WFFC consumer, so everything converges without recreating anything.
-
-### Solution 13 — PVC Pending: triple mismatch
-
-```bash
-k describe pvc shared -n t13-diag | tail -3
-k get pv pv-t13 -o yaml | grep -E 'storage:|accessModes|volumeMode' -A1
-```
-
-Blocking rules (all must hold, three fail):
-
-1. Capacity: PV 1Gi < requested 2Gi.
-2. Access modes: PV `[ReadWriteOnce]` does not include requested `ReadWriteMany`.
-3. volumeMode: PV `Block` vs PVC `Filesystem`.
-
-(Class matches: PV has no class, PVC has `""` — that pair is compatible.)
-
-Capacity and accessModes are patchable on an unbound PV; **volumeMode is immutable** — the patch is rejected with "field is immutable", so the PV must be recreated:
-
-```bash
-k patch pv pv-t13 --type merge -p '{"spec":{"volumeMode":"Filesystem"}}'   # fails — proves immutability
-k delete pv pv-t13
-k apply -f - <<'EOF'
+---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: pv-t13
+  name: pv-local-w2
 spec:
   capacity:
     storage: 2Gi
-  accessModes: [ReadWriteMany]
-  volumeMode: Filesystem
+  accessModes: [ReadWriteOnce]
   persistentVolumeReclaimPolicy: Retain
-  hostPath:
-    path: /tmp/t13-data
-    type: DirectoryOrCreate
-EOF
-k get pvc shared -n t13-diag -w      # Bound
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/ssd1
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - cka-worker2
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: local-claim
+  namespace: storage-lab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-storage
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: local-pod
+  namespace: storage-lab
+spec:
+  containers:
+  - name: c
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: d
+      mountPath: /data
+  volumes:
+  - name: d
+    persistentVolumeClaim:
+      claimName: local-claim
 ```
-
-Why: binding needs all five rules simultaneously; deleting an `Available` PV is safe (no data/claim), and recreating is the only route past an immutable field.
-
-### Solution 14 — ContainerCreating: FailedMount
 
 ```bash
-k get pods -n t14-diag                          # ContainerCreating (NOT Pending — it scheduled)
-POD=$(k get pod -n t14-diag -l app=site -o name)
-k describe -n t14-diag "$POD" | tail -8
-# Warning  FailedMount  MountVolume.SetUp failed for volume "conf" :
-#   configmap "site-conf" not found
-k get pvc -n t14-diag                           # site-data Bound — the team was right, red herring
+# create the backing dir on the target node first (else mount fails)
+docker exec cka-worker2 mkdir -p /mnt/disks/ssd1
+k apply -f task15.yaml
+k -n storage-lab get pvc local-claim         # Bound after the pod schedules (WFFC)
+k -n storage-lab get pod local-pod -o wide   # NODE: cka-worker2
 ```
 
-Root cause: the pod mounts configMap `site-conf`, which doesn't exist. The PVC is healthy — `ContainerCreating` + `FailedMount` points at mount-time volume setup, and the event names the exact missing object. Minimal fix:
+Why: a `local` PV **must** carry `nodeAffinity`; the scheduler reads it and places the consuming pod on `cka-worker2`, the only node that can reach the disk. `hostPath` has no such affinity — the pod could be scheduled on any node and would silently see a different (or empty) `/mnt/disks/ssd1`. WFFC ensures binding waits for that scheduling decision.
+Exam-flavor note: on a kubeadm cluster you'd `ssh` to the node and `sudo mkdir` the path; on kind, `docker exec <node>` is the equivalent.
+
+---
+
+## Cleanup
 
 ```bash
-k create configmap site-conf -n t14-diag --from-literal=default.conf='server { listen 80; }'
-k get pods -n t14-diag -w        # kubelet retries the mount automatically -> Running
+k delete ns storage-lab --wait=false
+k delete pv pv-manual-2g pv-fix-1g pv-retain pv-small pv-empty-class pv-local-w2 --ignore-not-found
+k delete sc fast expandable local-storage --ignore-not-found
+# restore 'standard' as the default if a task switched it away
+k patch storageclass standard -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 ```
 
-Why: a missing configMap/secret blocks container start (ContainerCreating, not CrashLoop), and kubelet's periodic mount retry means creating the object is the entire fix — no pod restart needed.
+Exam-flavor note: PVs are cluster-scoped, so deleting the namespace does **not** remove them — clean them up explicitly, exactly as above. On the real exam, leftover PVs/PVCs from one task can silently break a later one; always verify `k get pv,sc` is clean before moving on.

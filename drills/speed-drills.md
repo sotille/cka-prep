@@ -150,16 +150,17 @@ k create ns drill-e 2>/dev/null || true
 E6 on kind — exec into the etcd pod (the node containers do not ship etcdctl):
 
 ```bash
-k -n kube-system exec etcd-cka-control-plane -- sh -c \
-  'ETCDCTL_API=3 etcdctl \
-   --endpoints=https://127.0.0.1:2379 \
-   --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-   --cert=/etc/kubernetes/pki/etcd/server.crt \
-   --key=/etc/kubernetes/pki/etcd/server.key \
-   snapshot save /var/lib/etcd/drill-snap.db'
-k -n kube-system exec etcd-cka-control-plane -- sh -c \
-  'ETCDCTL_API=3 etcdctl snapshot status /var/lib/etcd/drill-snap.db -w table'
+k -n kube-system exec etcd-cka-control-plane -- etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  snapshot save /var/lib/etcd/drill-snap.db
+k -n kube-system exec etcd-cka-control-plane -- etcdctl \
+  snapshot status /var/lib/etcd/drill-snap.db -w table
 ```
+
+Calling the `etcdctl` binary directly (no `sh -c`) runs even on distroless etcd images that ship no shell; `ETCDCTL_API=3` is dropped because API v3 is the default on etcd ≥3.4. If `kubectl exec` is blocked, reach etcdctl through the node runtime: `docker exec cka-control-plane crictl exec $(docker exec cka-control-plane crictl ps --name etcd -q) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key snapshot save /var/lib/etcd/drill-snap.db`.
 
 Exam-flavor note: on the real exam you `ssh` to the control-plane node, `sudo -i`, and run `etcdctl` on the host with the cert paths given in the task — the flags are identical, only the entry point differs. (`etcdctl snapshot status` is deprecated in favor of `etcdutl` in newer etcd releases; both syntaxes work on current exam versions.)
 
@@ -232,7 +233,7 @@ Reference answers (check after the run):
 
 ```bash
 k get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' > /tmp/node-ips.txt
-k -n kube-system get pods -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{end}' | sort -u
+k -n kube-system get pods -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u
 k get pods -A --sort-by=.metadata.creationTimestamp
 k get pods -A -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName
 k get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
@@ -279,13 +280,15 @@ k create ns drill-h 2>/dev/null || true
 | # | Task | Target | Pass condition |
 |---|---|---|---|
 | H1 | `helm repo update`, then find nginx charts in the bitnami repo | 60s | `helm search repo bitnami/nginx` lists the chart |
-| H2 | Install release `web` from `bitnami/nginx` into `drill-h` with `replicaCount=2` | 2m | `helm -n drill-h status web` → deployed; 2 pods |
-| H3 | Upgrade `web` to `replicaCount=3` | 60s | `k -n drill-h get deploy` shows 3 replicas; `helm -n drill-h history web` shows rev 2 |
-| H4 | Roll back `web` to revision 1 | 60s | history shows rev 3 "Rollback to 1"; 2 pods again |
+| H2 | Install release `web` from `bitnami/nginx` into `drill-h` with `replicaCount=2` | 2m | `helm -n drill-h status web` → deployed; `helm -n drill-h get values web` → `replicaCount: 2` |
+| H3 | Upgrade `web` to `replicaCount=3` | 60s | `helm -n drill-h get values web` → `replicaCount: 3`; `helm -n drill-h history web` shows rev 2 |
+| H4 | Roll back `web` to revision 1 | 60s | history shows rev 3 "Rollback to 1"; `helm -n drill-h get values web` → `replicaCount: 2` again |
 | H5 | Render the chart's manifests to `/tmp/web.yaml` **without** touching the cluster | 60s | `helm template web bitnami/nginx --set replicaCount=2 > /tmp/web.yaml`; file non-empty |
 | H6 | Uninstall `web` | 30s | `helm -n drill-h list` empty |
 | H7 | Build the kustomization at `/tmp/drill-k/base` to stdout, then apply it | 90s | `k kustomize /tmp/drill-k/base` renders; `k apply -k /tmp/drill-k/base`; deploy `kapp` in `drill-h` Ready |
 | H8 | Add a `namePrefix: prod-` to the kustomization and re-apply; delete the old deployment | 2m | `k -n drill-h get deploy prod-kapp` exists; `kapp` gone |
+
+**Bitnami caveat (Aug 2025 catalog change):** Bitnami moved its free `docker.io/bitnami/*` images to `docker.io/bitnamilegacy/*` and restricted the public chart catalog to latest-only, so `bitnami/nginx` can land in `ImagePullBackOff` on default values. The H2–H4 pass conditions above verify Helm release/revision state (`status` / `history` / `get values`), not running pods, so the drill still measures Helm reflexes regardless of image availability. To get pods actually Running, append `--set image.registry=docker.io --set image.repository=bitnamilegacy/nginx` to the install/upgrade (H2/H3), or install any chart whose images are public-pullable.
 
 Exam-flavor note: exam Helm tasks give you the repo URL and values in the task text — the muscle memory is `repo add → install -n ns --create-namespace --set k=v → upgrade → rollback`, exactly H1–H4.
 

@@ -1,5 +1,7 @@
 # CKA Mock Exam 2 — True Exam Level
 
+Calibrated to sit **right at real-exam difficulty** — not the softened warm-up of Exam 1, not the killer-grade compounding of Exam 3. Sixteen tasks, the official domain weights, one or two stacked faults per troubleshooting item, and the post-2025 curriculum surface (Gateway API, Kustomize, PriorityClass, client-cert users, HPA, cert inspection, static pods). If you clear 66% here inside 120 minutes, you are exam-ready.
+
 ## Rules
 
 | Rule | Value |
@@ -25,9 +27,9 @@ export do="--dry-run=client -o yaml"
 export now="--grace-period=0 --force"
 ```
 
-Node access: this lab substitutes `docker exec -it <node-name> bash` for the real exam's `ssh <node>` + `sudo -i`. Node names: `cka-control-plane`, `cka-worker`, `cka-worker2`.
+Node access: this lab substitutes `docker exec -it <node-name> bash` for the real exam's `ssh <node>` + `sudo -i`. Node names: `cka-control-plane`, `cka-worker`, `cka-worker2`. On the real exam every task opens with a `kubectl config use-context ...` line — build the reflex of running it before you touch anything.
 
-**Warning, read once:** this exam contains cluster-level faults. If pods you create in *any* task sit in `Pending` with **no events at all**, that is a symptom of one of the troubleshooting tasks — hunt it down and fix it before continuing. Skim all 16 tasks in the first 5 minutes, exactly as you should on the real exam.
+**Warning, read once, then start the clock:** this exam contains cluster-level faults. If pods you create in *any* task sit in `Pending` with **no events at all**, that is a symptom of one of the troubleshooting tasks (the scheduler) — hunt it down and fix it before you burn minutes debugging the wrong thing. Skim all 16 tasks in the first 5 minutes, exactly as you should on the real exam, and fix cluster-wide faults early.
 
 Domain weights mirror the live exam: Troubleshooting 30, Cluster Architecture 25, Services & Networking 20, Workloads & Scheduling 15, Storage 10. Verify the current curriculum version on the CNCF curriculum page before exam day.
 
@@ -171,13 +173,15 @@ Use context `kind-cka`. A PersistentVolume `pv-archive` pre-exists (2Gi, storage
 - Create a Pod `archive-pod` in `storage-task` (image `busybox:1.36`, long-running) mounting the claim at `/mnt/archive`, and write any file into that mount.
 - Finish state: PV and PVC `Bound`, pod `Running`.
 
-## Task 15 — RBAC for a ServiceAccount (5%)
+## Task 15 — Static Pod on the control plane (5%)
 
-Use context `kind-cka`. Namespace `ci` pre-exists with ServiceAccount `deploy-bot`.
+Use context `kind-cka`. You have node access to `cka-control-plane`.
 
-- Grant `deploy-bot` the ability to `create`, `get`, `list`, `update`, `patch` Deployments — in namespace `ci` only. Use a Role `deploy-manager` and a RoleBinding `deploy-bot-binding`.
-- It must **not** be able to delete Deployments or read Secrets.
-- Verify both the allow and the deny with `kubectl auth can-i`.
+- Create a **static pod** named `web-static` in namespace `default` on node `cka-control-plane`: image `nginx:1.27-alpine`, container named `web`. Do it by placing a manifest in the kubelet's static-pod directory — do **not** `kubectl apply` it.
+- The kubelet must pick it up and the mirror pod must reach `Running`.
+- Write the mirror pod's full name (as it appears in `kubectl get pods -n default`) to `/tmp/exam2/15-staticpod.txt`.
+
+*Exam flavor: on the real exam this is `ssh <control-plane>` + `sudo -i`; here `docker exec -it cka-control-plane bash`. The static-pod directory is the `staticPodPath` in the kubelet config (default `/etc/kubernetes/manifests`).*
 
 ## Task 16 — Pods stuck Pending cluster-wide (7%)
 

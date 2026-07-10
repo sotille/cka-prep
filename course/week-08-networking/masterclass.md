@@ -179,7 +179,7 @@ kube-proxy runs as a DaemonSet (`kube-system/kube-proxy` on kubeadm clusters; ki
 |---|---|---|
 | `iptables` | chains `KUBE-SERVICES` → `KUBE-SVC-*` → `KUBE-SEP-*`, random DNAT | default; rule count scales with services×endpoints |
 | `ipvs` | kernel IPVS virtual servers, hash-based lookup | better at scale, real LB algorithms (`rr`, `lc`...); needs kernel modules |
-| `nftables` | native nftables tables | newer; alpha 1.29, GA ~1.33 — version-dependent, one to *recognize* |
+| `nftables` | native nftables tables | newer; alpha 1.29, beta 1.31 and still maturing (not GA in the ~1.33 timeframe) — confirm current status; one to *recognize* |
 
 Config lives in the **kube-proxy ConfigMap**, mounted by the DaemonSet:
 

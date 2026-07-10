@@ -142,7 +142,7 @@ Setup (installs the nginx ingress controller on kind, creates backends and cert)
 ```bash
 # controller (kind flavor); label a node first because the manifest node-selects ingress-ready=true
 k label node cka-worker ingress-ready=true --overwrite
-k apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+k apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.1/deploy/static/provider/kind/deploy.yaml
 k -n ingress-nginx wait --for=condition=Ready pod -l app.kubernetes.io/component=controller --timeout=300s
 
 k create ns ingress-lab
@@ -210,7 +210,8 @@ Context: `netpol-lab` as after task 12.
 
 1. Deny **all egress** from all pods in `netpol-lab` (`default-deny-egress`).
 2. Re-allow **DNS** (UDP and TCP 53) to any namespace for all pods (`allow-dns`).
-3. Allow pods labeled `role=api` to reach pods labeled `role=db` on **TCP 5432** (`allow-api-to-db`).
+3. Allow pods labeled `role=api` **egress** to pods labeled `role=db` on **TCP 5432** (`allow-api-to-db`).
+4. Allow **ingress** to pods labeled `role=db` from pods labeled `role=api` on **TCP 5432** (`allow-api-to-db-ingress`). Rung 1's `default-deny-ingress` isolates `db` too, so the api-side egress allow is necessary but not sufficient — `db` must also admit the connection or it dies at the receiver's ingress.
 
 Verify: `api` can resolve names and connect to `db:5432`; `api` can NOT reach `frontend:8080`; `frontend` can still reach `api:8080` (rung 2 must keep working — explain in one line why the egress deny would have silently broken it if you had skipped step 2... check name vs IP behavior).
 
@@ -782,7 +783,29 @@ spec:
     ports:
     - protocol: TCP
       port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-db-ingress
+  namespace: netpol-lab
+spec:
+  podSelector:
+    matchLabels:
+      role: db
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          role: api
+    ports:
+    - protocol: TCP
+      port: 5432
 ```
+
+`allow-api-to-db` (api's *egress*) and `allow-api-to-db-ingress` (db's *ingress*) are a matched pair: rung 1's namespace-wide `default-deny-ingress` isolates `db` for ingress just like every other pod, so opening only api's egress leaves the connection to time out at db's ingress. Both sides must permit the flow.
 
 ```bash
 k apply -f egress-ladder.yaml

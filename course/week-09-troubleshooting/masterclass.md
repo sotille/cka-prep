@@ -1,715 +1,740 @@
-# Week 09 — Troubleshooting Masterclass (Troubleshooting 30% — the single biggest domain, the exam-decider)
+# Week 09 Masterclass — Troubleshooting (30% of the exam — the single largest domain, the exam-decider)
 
-Troubleshooting is worth roughly a third of your score — expect 5–7 of the 15–20 tasks to be "something is broken, fix it". Unlike authoring tasks, these have unbounded time sinks: a candidate without playbooks burns 15 minutes staring at a dead API server. Every playbook below has the same shape: **symptom → first-30-seconds commands → decision path → root causes ranked by frequency → fix patterns**. Drill them until the decision paths run without conscious thought; on exam day you should be typing before you finish reading the task.
+Troubleshooting is 30% of the CKA. It is also the domain that silently eats the other four: a "Storage" task that presents as a Pending pod, a "Networking" task that presents as empty endpoints, an "Architecture" task that presents as a dead apiserver. The exam does not label these tasks by domain. You are handed a symptom and a broken cluster, and the clock is running. Winning here is not knowledge, it is **method**: the same four questions and the same first-30-seconds command set applied to every symptom, so you never freeze staring at a Pending pod wondering where to start.
 
-Written against Kubernetes v1.31+ behavior. Where something is version-dependent it is flagged inline. Check the current exam version on the CNCF curriculum page (github.com/cncf/curriculum) before your attempt.
+This masterclass is eight playbooks. Each has the same shape: **symptom → first-30-seconds commands → decision path (a text decision tree) → root causes ranked by how often they are the actual cause → fix patterns.** Memorize the shape, not just the content. On exam day you will not have time to think about *how* to troubleshoot; you will only have time to execute.
 
-Conventions: `alias k=kubectl`, `export do="--dry-run=client -o yaml"`, `export now="--grace-period=0 --force"`.
+> **Lab note:** everything here runs on the 3-node kind cluster `cka` (context `kind-cka`, nodes `cka-control-plane` / `cka-worker` / `cka-worker2`). On kind, each node is a Docker container running systemd, so `docker exec cka-worker systemctl status kubelet` and `journalctl -u kubelet` work exactly as they would over SSH on a real kubeadm node. Where the real exam differs (you `ssh node01` and use `sudo`), a one-line **exam-flavor** note calls it out.
 
----
+Assume these are set (course convention): `alias k=kubectl`, `export do="--dry-run=client -o yaml"`, `export now="--grace-period=0 --force"`.
 
 ## What the exam actually asks
 
-| Curriculum bullet (Troubleshooting, 30%) | Typical task phrasing | Playbook |
+| Symptom you are handed | Real domain(s) behind it | Playbook |
 |---|---|---|
-| Troubleshoot clusters and nodes | "Node X is NotReady. Fix it and make the fix persistent." | 4 |
-| Troubleshoot cluster components | "The API server / scheduler on cluster2 is not working." | 5, 8 |
-| Monitor cluster and application resource usage | "Find the pod using the most CPU in namespace X, write its name to /opt/answer.txt" | Monitoring |
-| Manage and evaluate container output streams | "Save the logs of the failing container to /opt/logs.txt" | 2 |
-| Troubleshoot services and networking | "Service X does not serve traffic / DNS resolution fails" | 3, 6 |
+| "Pod X stays Pending — make it run" | Scheduling 15% / Storage 10% / Troubleshooting 30% | 1 |
+| "Pod X keeps restarting / CrashLoopBackOff / ImagePullBackOff" | Workloads 15% / Troubleshooting 30% | 2 |
+| "Pods are Running but the app is unreachable through its Service" | Networking 20% / Troubleshooting 30% | 3 |
+| "Node nodeXX is NotReady — fix it" | Architecture 25% / Troubleshooting 30% | 4 |
+| "kubectl returns nothing / apiserver is down / deployments don't scale" | Architecture 25% / Troubleshooting 30% | 5 |
+| "Pods can't resolve service names / DNS is broken" | Networking 20% / Troubleshooting 30% | 6 |
+| "This kubeconfig doesn't work / user gets Forbidden" | Cluster Architecture 25% / Troubleshooting 30% | 7 |
+| "etcd is unhealthy / restore from a snapshot" | Architecture 25% / Troubleshooting 30% | 8 |
 
-The other domains leak into this one constantly: a Storage task about a Pending PVC is playbook 1; a Cluster Architecture task about RBAC gone wrong is playbook 7; a Networking task where the Gateway routes nowhere starts at playbook 3. The 30% number understates how much of the exam is really diagnosis.
-
-**The universal law:** `k describe` on the failing object plus `k get events` answers roughly 70% of troubleshooting tasks by themselves. Kubernetes tells you what is wrong; the skill is knowing which object to ask and reading the answer literally.
+Not asked: reading Go stack traces from component source, writing a CNI plugin, deep BGP/Calico internals. The exam wants you to **localize the fault to a component, read that component's own logs, and apply a standard fix** — fast. Written against Kubernetes v1.31+ behavior; where something is version-dependent it is flagged inline. Confirm the live exam version on the CNCF curriculum page (github.com/cncf/curriculum) before your attempt.
 
 ---
 
-## The universal first minute
+## The universal first move
 
-Before any playbook, the same four commands, every single broken-cluster task:
+Before any playbook, every troubleshooting task answers four questions in order. Do not skip ahead; skipping is how you waste ten minutes fixing the wrong layer.
+
+1. **Is the control plane answering me?** `k get nodes` returns instantly → apiserver + etcd are alive; go to the workload. It hangs or errors → you are in Playbook 5 first, everything else is downstream noise.
+2. **What object is unhealthy, and what does its status say?** `k get <kind> <name> -n <ns> -o wide` — READY column, STATUS, RESTARTS, NODE, IP. The status string is a diagnosis, not decoration: `ImagePullBackOff`, `CreateContainerConfigError`, `ContainerCreating` stuck, `Pending`, `NotReady` each point at a specific layer.
+3. **What do the events say?** `k describe <kind> <name> -n <ns>` — read the **Events** block at the bottom first. A large share of exam troubleshooting is solved by reading events. The scheduler, kubelet, and controllers narrate their failures here.
+4. **What do the logs say?** For a workload: `k logs <pod> -n <ns>` and, when it has restarted, `k logs <pod> -n <ns> --previous`. For a cluster component that is a static pod: `k logs -n kube-system <static-pod>`; if the apiserver is dead, drop to `crictl logs`.
+
+The commands you type reflexively, in every task:
 
 ```bash
-kubectl config use-context kind-cka          # the task names a context; skipping this = silent zero
-k get nodes                                  # NotReady anywhere? that recolors everything else
-k get pods -A | grep -vE 'Running|Completed' # the not-fine list
-k get events -A --sort-by=.lastTimestamp | tail -20
+k get pods -A -o wide                 # cluster-wide health at a glance; watch for non-Running
+k get events -A --sort-by=.lastTimestamp | tail -30   # the events firehose, newest last
+k describe <kind> <name> -n <ns>      # events + spec reality for one object
+k get componentstatuses               # legacy but instant control-plane triage (deprecated, still works)
 ```
 
-Then place the failure on the pod lifecycle chain and jump to the playbook that owns that arrow:
-
-```text
-manifest accepted -> scheduled -> image pulled -> container started -> Ready -> reachable
-      |                 |             |                  |               |         |
-   (apply         (Pending:        (ErrImagePull:   (CrashLoop:      (probe:   (Service/DNS/
-    rejected:      playbook 1)      playbook 2)      playbook 2)   playbook 2)  netpol: 3, 6)
-    quota/RBAC/
-    validation)
-```
-
-If the API server itself does not answer, none of this works — that is playbook 5, and it has its own toolbox (`crictl`, journal, static manifests).
+Speed reflex: never open an editor to *read* a status. `k get`/`k describe`/`k logs` beat any editor. Only edit once you have already localized the fault.
 
 ---
 
-## Playbook 1 — Pod Pending
+## Playbook 1 — Pod Pending (it will not schedule)
 
-**Symptom:** pod stuck `Pending`; `-o wide` shows no node assigned.
+**Symptom:** `STATUS: Pending`, `NODE: <none>`. The pod object exists but no kubelet has been told to run it, because the scheduler has not bound it to a node — or cannot.
 
 **First 30 seconds:**
 
 ```bash
-k -n NS get pod PODNAME -o wide                 # NODE column empty? never scheduled
-k -n NS describe pod PODNAME | tail -15         # the FailedScheduling event IS the answer
-k get nodes -o wide                             # capacity/readiness context
+k get pod webapp -n prod -o wide                 # confirm Pending, NODE <none>
+k describe pod webapp -n prod | tail -20         # Events: "FailedScheduling ..." is the whole answer
+k get nodes                                       # are nodes Ready at all?
+k describe node cka-worker | grep -A6 -iE 'taint|allocatable|pressure'
 ```
+
+The `FailedScheduling` event from the scheduler literally names the reason: `Insufficient cpu`, `Insufficient memory`, `node(s) had untolerated taint {...}`, `node(s) didn't match Pod's node affinity/selector`, `pod has unbound immediate PersistentVolumeClaims`, `0/3 nodes are available`.
 
 **Decision path:**
 
 ```text
-Pod Pending
-├── describe shows a FailedScheduling event → read it literally
-│   ├── "Insufficient cpu" / "Insufficient memory"
-│   │     → sum of requests doesn't fit any node
-│   │       → lower requests, or free capacity, or (if task allows) add tolerated node
-│   ├── "node(s) had untolerated taint {...}"
-│   │     → k describe node X | grep -i taint → add toleration OR remove taint
-│   ├── "didn't match Pod's node affinity/selector"
-│   │     → k get nodes --show-labels → fix nodeSelector/affinity or label the node
-│   ├── "unbound immediate PersistentVolumeClaims" / "persistentvolumeclaim not found"
-│   │     → k get pvc: no matching PV? no StorageClass? WaitForFirstConsumer is NORMAL-pending
-│   └── "didn't satisfy existing pods anti-affinity" / "exceed max volume count" → read literally
-├── describe shows NO events at all
-│   └── scheduler is not running → playbook 5 (kube-scheduler static pod)
-└── pod HAS a node (nodeName set) but not Running
-    └── it is not a scheduling problem: ContainerCreating/Init → playbook 2 or node/CNI → playbook 4
+describe pod -> Events block
+|
++-- No events at all, ever  --------------------> scheduler itself is down -> go to Playbook 5
+|
++-- "Insufficient cpu/memory" --------------------> requests exceed free Allocatable
+|      fix: lower requests, or free/scale nodes, or remove other pods
+|
++-- "untolerated taint {key: value}" -------------> node tainted (control-plane NoSchedule, or custom)
+|      fix: add matching toleration, or target a schedulable node, or (rarely) remove the taint
+|
++-- "didn't match node affinity/selector" --------> nodeSelector/affinity has no matching node
+|      fix: correct the label selector, or label a node to match
+|
++-- "unbound ... PersistentVolumeClaims" ---------> PVC not Bound -> jump to the PVC sub-tree below
+|
++-- "0/3 nodes available: node(s) had ... " ------> combination; read every clause, each is one node's reason
 ```
 
-**Root causes ranked by frequency (exam):**
+PVC sub-tree (Pending because storage will not bind):
 
-1. Resource requests exceed node allocatable (often a comedy request like `cpu: "64"`).
-2. Untolerated taint (control-plane taint, or a `NoSchedule` taint planted on the target node).
-3. `nodeSelector`/affinity referencing a label no node carries (typo'd hostname, missing `disktype=ssd`).
-4. PVC unbound: no default StorageClass, wrong `storageClassName`, no matching PV.
-5. Scheduler dead — Pending pods with zero events, cluster-wide.
-6. ResourceQuota — but note: quota rejects at admission, so the *pod never exists*; look at the ReplicaSet's events (`k describe rs`) for `exceeded quota`.
+```text
+k get pvc -n <ns>   ->  STATUS Pending
+|
++-- describe pvc: "no persistent volumes available ... no storage class" -> no (default) StorageClass
++-- "waiting for first consumer" + WaitForFirstConsumer -> NORMAL: PVC binds only once a pod schedules
++-- provisioner name wrong / provisioner pod down -> check the CSI/provisioner pod in kube-system
+```
+
+**Root causes, ranked:**
+
+1. **Insufficient resources** — requests too high for remaining Allocatable. Most common in scale-up tasks.
+2. **Taints without tolerations** — classic on control-plane nodes (`node-role.kubernetes.io/control-plane:NoSchedule`) and after `kubectl cordon`/pressure taints.
+3. **PVC won't bind** — missing/renamed StorageClass, or genuinely `WaitForFirstConsumer` (not a bug).
+4. **nodeSelector / nodeAffinity mismatch** — a label typo, or the target label was never applied to any node.
+5. **Scheduler down** — no events *ever*; the pod is invisible to scheduling. This is Playbook 5.
 
 **Fix patterns:**
 
 ```bash
-# requests too big — pod spec resources are immutable: dump, edit, replace
-k -n NS get pod PODNAME -o yaml > /tmp/p.yaml   # edit requests down
-k replace --force -f /tmp/p.yaml                # --force = delete+recreate
+# Scheduler's own words for every node it rejected:
+k get events -n prod --field-selector reason=FailedScheduling
 
-# taint in the way (when the task lets you touch the node)
-k taint node cka-worker key-                    # trailing '-' removes the taint
+# Taint: tolerate it on the pod, or (if a leftover) remove it from the node
+k taint nodes cka-worker dedicated=team-a:NoSchedule-      # trailing minus removes a taint
 
-# or tolerate it instead (edit the controller, not the pod, when it's a Deployment)
-k -n NS edit deploy DEPLOY                      # add .spec.template.spec.tolerations
+# Resources: shrink the request so it fits
+k set resources deploy webapp -n prod --requests=cpu=100m,memory=128Mi
 
-# label to satisfy a selector
+# Node label to satisfy a selector
 k label node cka-worker disktype=ssd
 ```
 
-`WaitForFirstConsumer` trap: a PVC Pending with event "waiting for first consumer" is *healthy* — it binds when a pod uses it. Do not "fix" it.
+**Trap:** `Pending` with `NODE` already set is **not** a scheduling problem — the scheduler already bound it; the kubelet is stuck (image pull, volume mount). Read events, not scheduler capacity. And a pod stuck `ContainerCreating` is *not* Pending — it is scheduled and the kubelet is failing to start it (CNI, volume, secret) — that is Playbook 2/4 territory.
 
 ---
 
-## Playbook 2 — Pod crashing, image errors, config errors
+## Playbook 2 — Pod crashing / CrashLoopBackOff / image errors
 
-**Symptom:** `CrashLoopBackOff`, `ErrImagePull`/`ImagePullBackOff`, `CreateContainerConfigError`, `StartError`, endless restarts, or `Completed` cycling.
+**Symptom:** high `RESTARTS`, `STATUS: CrashLoopBackOff`, `Error`, `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`, or `RunContainerError`.
 
 **First 30 seconds:**
 
 ```bash
-k -n NS get pod PODNAME                          # the STATUS string routes you
-k -n NS describe pod PODNAME | tail -20          # events + last state + exit code
-k -n NS logs PODNAME --previous --tail=30        # the CRASHED attempt, not the current one
+k get pod api -n prod -o wide                       # RESTARTS count, STATUS string
+k describe pod api -n prod                           # Events + Last State + Exit Code + Reason
+k logs api -n prod                                   # current attempt
+k logs api -n prod --previous                        # the attempt that CRASHED (this is the gold)
 ```
 
-**The STATUS string is a router.** Learn the table cold:
+`--previous` is the single most important flag in this playbook. A CrashLooping container's *current* logs are usually empty (it just restarted); the logs that explain the crash belong to the **previous** dead container. For multi-container pods add `-c <container>`.
 
-| STATUS | What it means | Where to look |
-|---|---|---|
-| `ErrImagePull` → `ImagePullBackOff` | registry/name/tag wrong, private registry auth, network | `describe`: "manifest unknown", "pull access denied" |
-| `InvalidImageName` | malformed image reference (uppercase, stray space) | fix the string |
-| `CreateContainerConfigError` | env var references a **missing ConfigMap/Secret (or key)** | `describe`: "configmap \"x\" not found" |
-| `ContainerCreating` (stuck) | **volume**-mounted ConfigMap/Secret missing, PVC unbound, or CNI sandbox failure | `describe`: `FailedMount` / `FailedCreatePodSandBox` |
-| `StartError` / `RunContainerError` | entrypoint binary not found / not executable | `describe` last state: exit code 128, "executable file not found" |
-| `CrashLoopBackOff` | process started, then exited nonzero | `logs --previous`, exit code |
-| `OOMKilled` (reason on last state) | memory limit hit | raise limit or fix the app |
-| `Completed` + restarts climbing | command finishes; `restartPolicy: Always` restarts it | long-running command, or it should be a Job |
+**Decision path — split by the STATUS string first, because they mean different failure layers:**
 
-Missing-reference nuance that costs points: a ConfigMap consumed as **env** fails with `CreateContainerConfigError`; the same ConfigMap consumed as a **volume** leaves the pod stuck `ContainerCreating` with `FailedMount` events. Different symptom, same root cause.
-
-**Exit codes** (read from `describe` or jsonpath — `lastState`, not `state`):
-
-```bash
-k -n NS get pod PODNAME -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'
+```text
+STATUS string
+|
++-- ImagePullBackOff / ErrImagePull -----------> kubelet cannot GET the image (never even started)
+|      describe -> Events: "failed to pull ... not found / unauthorized / no such host"
+|      causes: image typo | wrong tag | private registry, no imagePullSecret | air-gapped node
+|
++-- CreateContainerConfigError ----------------> a referenced ConfigMap/Secret key does not exist
+|      describe -> "couldn't find key X" / "secret Y not found"
+|      causes: envFrom/valueFrom points at a missing CM/Secret or missing key
+|
++-- RunContainerError / CreateContainerError --> command/mount problem at container start
+|      causes: bad command/args, missing mount, readonly fs, wrong securityContext
+|
++-- CrashLoopBackOff / Error (Exit Code N) ----> container STARTED then died -> read logs --previous
+       Exit 0   : process finished (a job/one-shot mislabeled as long-running) -> not really a bug
+       Exit 1   : generic app error -> logs --previous tell you what
+       Exit 137 : SIGKILL -> OOMKilled (Reason: OOMKilled) or liveness probe killed it
+       Exit 139 : SIGSEGV -> app segfault
+       Exit 143 : SIGTERM -> killed during shutdown (often liveness/eviction)
 ```
 
-| Code | Meaning | Typical cause |
-|---|---|---|
-| 0 | clean exit | command finished — restart loop under `Always` |
-| 1 | generic app error | bad config value, unreachable dependency, exception |
-| 2 | shell misuse | broken shell one-liner |
-| 126 | cannot execute | permissions, mounted script not `+x` |
-| 127 | command not found | typo in `command:`/`args:`, wrong PATH |
-| 128 | container never exec'd | entrypoint path wrong ("no such file or directory") |
-| 137 | 128+9, SIGKILL | **OOMKilled — or liveness-probe kill escalation, or node eviction. Check the reason field and events before writing "OOM".** |
-| 139 | 128+11, SIGSEGV | binary crash |
-| 143 | 128+15, SIGTERM | graceful termination (rollout, liveness kill, drain) |
+Then the probe overlay — probes turn a *healthy* app into a restart loop:
 
-**Probes decide two different fates:**
+```text
+Events show "Liveness probe failed" / "Readiness probe failed"
+|
++-- Liveness failing  -> kubelet keeps KILLING and restarting a working container
+|      cause: probe path/port/scheme wrong, or initialDelaySeconds too short (app not up yet)
++-- Readiness failing -> container runs but never enters Ready -> pulled OUT of Service endpoints
+       cause: same probe misconfig; app is fine, Service just looks "dead" (this is also Playbook 3)
+```
 
-- **Liveness** fail → container restarted (SIGTERM, then SIGKILL). Symptom: restarts climbing, events say `Liveness probe failed`.
-- **Readiness** fail → pod removed from Service endpoints, **never restarted**. Symptom: pod `Running` but `0/1 READY`, Service has no endpoints. This is playbook 3's most common root cause.
-- **Startup** probe gates both until it succeeds. Failure budget = `failureThreshold × periodSeconds` — a slow app with `failureThreshold: 3, periodSeconds: 5` gets 15 s to boot before liveness starts killing it in a loop.
+**Root causes, ranked:**
 
-Backoff mechanics: crash restarts back off 10 s → 20 s → 40 s … capped at 5 m, reset after 10 m of stable running. Image pulls back off similarly. This is why a fixed pod can still sit in `CrashLoopBackOff` for a few minutes — force it with `k delete pod` (controller recreates immediately) instead of waiting out the backoff.
-
-**Root causes ranked by frequency (exam):**
-
-1. Wrong image tag/name → `ImagePullBackOff` (fix: `k set image`).
-2. Missing ConfigMap/Secret or key referenced by env/volume.
-3. Bad `command:`/`args:` (typo'd binary, wrong flag) → 127/128 or app usage error in logs.
-4. Liveness/readiness probe pointing at wrong port/path.
-5. OOMKilled — limit set lower than actual footprint.
-6. App-level config (crashes with a clear message in `logs --previous` — read it, the message names the missing env var or unreachable host).
+1. **Image name/tag wrong or unpullable** — `ImagePullBackOff`. Fastest fix in the whole exam if you spot it.
+2. **Missing ConfigMap/Secret reference** — `CreateContainerConfigError`; the pod never runs until the key exists.
+3. **App misconfiguration** — bad env var, missing file, wrong DB host → Exit 1, read `--previous`.
+4. **OOMKilled** — Exit 137, `Reason: OOMKilled`; memory limit too low or a leak. Raise the limit or fix the app.
+5. **Probe misconfiguration** — a healthy container killed by a wrong liveness probe, or drained by a wrong readiness probe.
 
 **Fix patterns:**
 
 ```bash
-k -n NS set image deploy/DEPLOY CONTAINER=nginx:1.27       # image typo — fastest legal fix
-k -n NS create configmap app-config --from-literal=DB_HOST=db   # recreate what's missing
-k -n NS edit deploy DEPLOY                                 # command/probe/limits — rollout applies it
-k -n NS logs deploy/DEPLOY --all-containers --prefix --tail=30  # multi-container triage
+# Image typo -> just set the right image, deployment rolls itself
+k set image deploy/api api=nginx:1.27 -n prod
+
+# Confirm the missing reference the kubelet is complaining about
+k get pod api -n prod -o jsonpath='{.spec.containers[*].envFrom}{"\n"}'
+k get configmap,secret -n prod
+
+# OOM: raise the limit
+k set resources deploy/api -n prod --limits=memory=256Mi
+
+# Probe wrong: edit the probe (path/port/initialDelaySeconds)
+k edit deploy/api -n prod     # fix livenessProbe.httpGet.port / .path / initialDelaySeconds
+
+# Private registry: attach an imagePullSecret
+k create secret docker-registry regcred --docker-server=registry.internal \
+  --docker-username=svc --docker-password=REDACTED -n prod
+k patch sa default -n prod -p '{"imagePullSecrets":[{"name":"regcred"}]}'
 ```
 
-For a bare pod (no controller), `edit` is rejected for most spec fields: dump to file, fix, `k replace --force -f`.
+**Trap:** `RESTARTS: 0` with `STATUS: Completed` is not broken — it is a Job/one-shot that ran to completion. And a pod that is `Running` but `0/1` READY is *not* crashing — it is failing readiness (Playbook 3). Match the fix to the exact column.
 
 ---
 
-## Playbook 3 — Pod Running but app unreachable
+## Playbook 3 — Pod Running but the app is unreachable
 
-**Symptom:** pods `Running` and `READY`, but `curl http://svc` times out or refuses; "users report the app is down".
+**Symptom:** pods are `Running` and `1/1 READY`, but a client (test pod, curl, or the exam checker) cannot reach the app through its Service.
 
 **First 30 seconds:**
 
 ```bash
-k -n NS get svc SVCNAME -o wide                  # selector, ports, type, clusterIP
-k -n NS get endpoints SVCNAME                    # THE central clue: empty or populated?
-k -n NS get pods -o wide --show-labels           # labels vs selector; READY column; pod IPs
+k get pod -n prod -o wide -l app=web                 # are the pods actually READY (not just Running)?
+k get svc web -n prod -o wide                          # type, CLUSTER-IP, PORT(S), SELECTOR
+k get endpointslices -n prod -l kubernetes.io/service-name=web   # ADDRESSES: empty == the bug
+k describe svc web -n prod | grep -i endpoints        # fastest endpoints check
 ```
 
-(EndpointSlices are the real API — `k -n NS get endpointslices -l kubernetes.io/service-name=SVCNAME` — but `get endpoints` remains the fastest read.)
+The single decisive question: **does the Service have endpoints?** No endpoints → the Service selector does not match ready pods → nothing else matters. Endpoints present but unreachable → it is a port, policy, or node-path problem.
 
 **Decision path:**
 
 ```text
-Service unreachable
-├── Endpoints EMPTY
-│   ├── selector matches no pod labels        → fix svc selector or pod labels
-│   │     k get pods -l 'KEY=VALUE' -n NS     ← paste the selector; zero rows = mismatch
-│   ├── pods exist but 0/1 READY              → readiness probe failing → playbook 2
-│   └── pods don't exist at all               → playbook 1/2 first
-├── Endpoints POPULATED but ClusterIP times out
-│   ├── curl the POD IP directly from a test pod
-│   │     ├── pod IP works, ClusterIP doesn't → kube-proxy broken (see below) or NetworkPolicy
-│   │     └── pod IP also fails               → app not listening on that port / netpol
-│   ├── targetPort ≠ port the container actually listens on   → fix targetPort
-│   │     (named targetPort must match the container port's NAME, not its number)
-│   └── NetworkPolicy: k get netpol -A        → a default-deny in the namespace? add an allow policy
-└── ClusterIP works, DNS name doesn't        → playbook 6
+k describe svc -> Endpoints:
+|
++-- Endpoints: <none>  ---------------------------------> selector/label mismatch OR pods not Ready
+|      check 1: do svc.spec.selector labels == pod labels?  (typo like app=web vs app=web-frontend)
+|      check 2: are pods READY? a failing readinessProbe removes them from endpoints
+|      fix: correct the selector, or fix the readiness probe / the app
+|
++-- Endpoints present (IP:port list) -------------------> selector is fine; test each layer inward
+       test A (app itself):  wget POD_IP:targetPort     -> fails? app/port problem, back to Playbook 2
+       test B (service):     wget CLUSTERIP:port         -> fails but A works? port/targetPort mismatch
+       test C (dns):         wget svc.ns.svc:port         -> fails but B works? DNS problem -> Playbook 6
+       test D (policy):      any NetworkPolicy in ns?    -> a default-deny with no matching allow
 ```
 
-**Root causes ranked by frequency (exam):**
+Run those inward tests from a throwaway pod:
 
-1. Service selector doesn't match pod labels (`app: web` vs `app: web-frontend`).
-2. `targetPort` wrong (svc says 8080, container listens on 80) or named port mismatch.
-3. Pods not Ready — readiness probe misconfigured → empty endpoints.
-4. NetworkPolicy default-deny with no allow rule (exam plants these quietly).
-5. kube-proxy not running on the node (DaemonSet broken) — old Services keep working via stale iptables rules; **new** Services are never programmed. That asymmetry is the fingerprint.
-6. Wrong port tested (`port` is the Service's port; `nodePort` is the node's; `targetPort` is the container's).
+```bash
+k run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh
+# inside, substitute real values from the describe output:
+#   wget -qO- --timeout=2 http://10.244.1.7:80          # A: is the app alive at all?
+#   wget -qO- --timeout=2 http://10.96.12.34:80          # B: does the Service DNAT reach it?
+#   wget -qO- --timeout=2 http://web.prod.svc:80         # C: does DNS + Service work end to end?
+```
+
+**Root causes, ranked:**
+
+1. **Selector/label mismatch** — Service `spec.selector` does not equal the pods' labels. `Endpoints: <none>`. The #1 "app unreachable" cause on the exam.
+2. **port vs targetPort mismatch** — Service `port` is what clients hit; `targetPort` must equal the container's listening port. Wrong `targetPort` → connection refused with healthy endpoints.
+3. **Readiness probe failing** — pods `Running` but `0/1`, silently pulled out of endpoints. Looks like a dead Service; is actually a probe/app bug.
+4. **NetworkPolicy default-deny** — a `default-deny` policy with no matching allow rule blocks the traffic; endpoints look perfect.
+5. **DNS** — name won't resolve but ClusterIP works → Playbook 6, not a Service bug.
 
 **Fix patterns:**
 
 ```bash
-k -n NS patch svc SVCNAME -p '{"spec":{"selector":{"app":"web"}}}'
-k -n NS patch svc SVCNAME --type=json \
-  -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":80}]'
-k run tmp --rm -it --image=busybox:1.36 --restart=Never -- \
-  wget -qO- --timeout=2 http://SVCNAME.NS      # in-cluster reachability test, one line
+# See the actual pod labels vs the service selector, side by side
+k get pods -n prod --show-labels
+k get svc web -n prod -o jsonpath='{.spec.selector}{"\n"}'
+
+# Fix a wrong selector
+k patch svc web -n prod -p '{"spec":{"selector":{"app":"web"}}}'
+
+# Fix targetPort
+k patch svc web -n prod --type=json -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":80}]'
+
+# Prove/deny a NetworkPolicy is the cause
+k get netpol -n prod
+k describe netpol default-deny -n prod
 ```
 
-Minimal allow policy against a default-deny (adjust labels/ports):
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-client-to-web
-  namespace: prod
-spec:
-  podSelector:
-    matchLabels:
-      app: web
-  policyTypes:
-  - Ingress
-  ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          app: client
-    ports:
-    - protocol: TCP
-      port: 80
-```
+**Trap:** `Endpoints: <none>` on a **headless** Service (`clusterIP: None`) is normal if it is meant for a specific StatefulSet. And endpoints populated but the exam checker still fails often means the client is in another namespace and needs the FQDN `web.prod.svc.cluster.local`, or a NetworkPolicy blocks cross-namespace traffic. Always test from where the *checker* sits.
 
 ---
 
 ## Playbook 4 — Node NotReady
 
-**Symptom:** `k get nodes` shows `NotReady`; pods on the node stuck `Terminating`/`Unknown`, new pods avoid it.
+**Symptom:** `k get nodes` shows a node `NotReady`. Pods on it go to `Terminating`/`Unknown`; new pods scheduled there stick in `ContainerCreating`.
 
-**First 30 seconds:**
+**First 30 seconds (from the API):**
 
 ```bash
-k get nodes
-k describe node NODENAME | grep -A10 Conditions   # Ready False vs Unknown — different diseases
-# then get ON the node:
-ssh NODENAME && sudo -i                            # exam
-docker exec -it cka-worker bash                    # kind lab equivalent
-systemctl status kubelet
-journalctl -u kubelet --no-pager | tail -50
+k get nodes -o wide                                        # which node, and its kubelet/runtime versions
+k describe node cka-worker | grep -A15 Conditions          # Ready=False + the REAL reason string
+k get pods -A -o wide --field-selector spec.nodeName=cka-worker
 ```
 
-**`Ready=Unknown` vs `Ready=False` is the first fork and most candidates never look:**
+Then get **onto the node** — this is where the answer lives. On kind: `docker exec -it cka-worker bash`. Exam-flavor: `ssh cka-worker` then `sudo -i`.
 
-- **Unknown** — the kubelet stopped posting status entirely (controller-manager marks it after `node-monitor-grace-period`, default 40 s). Kubelet dead, node off, or network to API server severed.
-- **False** — the kubelet is alive and *telling you what's wrong* in the condition message. Read it; it usually names the CNI or the runtime.
+```bash
+docker exec cka-worker systemctl status kubelet            # is the kubelet even running?
+docker exec cka-worker journalctl -u kubelet -n 40 --no-pager   # its own error log
+docker exec cka-worker systemctl status containerd         # is the runtime up?
+```
 
 **Decision path:**
 
 ```text
-Node NotReady
-├── Ready=Unknown → kubelet not reporting
-│   └── on the node: systemctl status kubelet
-│       ├── inactive (dead)      → systemctl enable --now kubelet   (enable = survives reboot)
-│       ├── activating/auto-restart loop → journalctl -u kubelet | tail -50, match the error:
-│       │   ├── "failed to load kubelet config file"      → /var/lib/kubelet/config.yaml missing/mangled
-│       │   ├── "unable to load client CA file" / x509    → cert paths in config, or expired kubelet cert
-│       │   │       → openssl x509 -noout -enddate -in /var/lib/kubelet/pki/kubelet-client-current.pem
-│       │   ├── "dial tcp ...:6443: connect: connection refused" → API server down (playbook 5)
-│       │   │       or wrong server: in /etc/kubernetes/kubelet.conf
-│       │   ├── "failed to run Kubelet: ... containerd.sock" → systemctl status containerd
-│       │   └── "running with swap on is not supported"   → swapoff -a (failSwapOn default true;
-│       │                                                    v1.28+ NodeSwap can allow it — read the config)
-│       └── kubelet active, node still Unknown → network path node→apiserver
-├── Ready=False → read the message in Conditions
-│   ├── "container runtime network not ready: ... cni plugin not initialized"
-│   │       → ls /etc/cni/net.d/        (empty or broken conflist = your answer)
-│   │       → CNI DaemonSet running on this node? k -n kube-system get pods -o wide | grep NODENAME
-│   └── runtime unhealthy → systemctl restart containerd; crictl info
-└── MemoryPressure / DiskPressure = True (node may still show Ready)
-        → df -h /  ; crictl rmi --prune  ; clear /var/log offenders
-        → kubelet evicts pods and taints the node until pressure clears
+describe node -> Conditions.Ready reason
+|
++-- "kubelet stopped posting node status" / Unknown -> kubelet not running or can't reach API
+|     on node: systemctl status kubelet
+|       dead/inactive -> systemctl start kubelet ; enable it to survive reboot
+|       active but failing -> journalctl -u kubelet -> read the fatal line:
+|         * "failed to load Kubelet config file /var/lib/kubelet/config.yaml" -> bad/edited config
+|         * "open /var/lib/kubelet/pki/... certificate ... expired" -> kubelet client cert expired
+|         * "failed to run Kubelet: ... cgroup" -> cgroup driver mismatch vs containerd
+|
++-- "container runtime network not ready: cni ... uninitialized" -> CNI config/plugin missing
+|     on node: ls /etc/cni/net.d   (empty?)  ;  ls /opt/cni/bin
+|       fix: restore the CNI config (or reinstall the CNI DaemonSet), restart containerd + kubelet
+|
++-- "container runtime is down" / "failed to get container runtime status" -> containerd dead
+|     on node: systemctl status containerd -> start it -> kubelet recovers
+|
++-- MemoryPressure/DiskPressure/PIDPressure = True -> node resource-starved -> node tainted, evicting
+      on node: df -h ; check /var full -> free space (logs, images: crictl rmi --prune)
 ```
 
-**Root causes ranked by frequency (exam):**
+**Root causes, ranked:**
 
-1. kubelet stopped (and usually also disabled — restart alone won't survive reboot; the task text often says "make sure it stays fixed": `enable --now`).
-2. kubelet config broken — wrong path/typo in `/var/lib/kubelet/config.yaml` or the systemd drop-in (`/etc/systemd/system/kubelet.service.d/10-kubeadm.conf`): `systemctl daemon-reload && systemctl restart kubelet` after fixing.
-3. CNI config missing/broken in `/etc/cni/net.d/` — node Ready=False, new pods stuck `ContainerCreating` with `FailedCreatePodSandBox`.
-4. containerd stopped.
-5. Expired kubelet client cert (rotation failed) — x509 errors in the journal.
-6. Disk pressure / disk full.
+1. **kubelet stopped** — crashed, `systemctl stop`ped, or disabled. `systemctl start kubelet` (+`enable`). The most common single break.
+2. **kubelet misconfigured** — someone edited `/var/lib/kubelet/config.yaml` (bad YAML, wrong `cgroupDriver`, wrong `staticPodPath`) or `/var/lib/kubelet/kubeconfig`; kubelet won't start until it's valid.
+3. **CNI missing** — `/etc/cni/net.d` empty or `/opt/cni/bin` gone → runtime network never initializes → node NotReady, pods ContainerCreating. (Emphasized post-Feb-2025: CNI awareness.)
+4. **containerd down** — runtime not answering the kubelet's CRI calls.
+5. **Resource pressure** — disk/memory full → pressure taints → evictions and NotReady.
 
 **Fix patterns:**
 
 ```bash
-systemctl enable --now kubelet            # fix + persistence in one move
-systemctl daemon-reload && systemctl restart kubelet   # after editing unit/drop-in
-systemctl restart containerd
-grep staticPodPath /var/lib/kubelet/config.yaml        # while you're in there: know your paths
+# kubelet down (must survive reboot -> enable)
+docker exec cka-worker systemctl enable --now kubelet
+
+# kubelet config broken: read the exact parse error, then fix the file
+docker exec cka-worker journalctl -u kubelet -n 20 --no-pager
+docker exec cka-worker vi /var/lib/kubelet/config.yaml       # fix, then:
+docker exec cka-worker systemctl restart kubelet
+
+# CNI config gone: put it back, bounce the runtime and kubelet
+docker exec cka-worker ls -la /etc/cni/net.d
+docker exec cka-worker systemctl restart containerd kubelet
+
+# Verify recovery (allow ~30-60s for status to post)
+k get nodes -w
 ```
 
-Key file map (kubeadm-style nodes, which is what the exam gives you):
-
-| File | Role |
-|---|---|
-| `/var/lib/kubelet/config.yaml` | KubeletConfiguration (staticPodPath, clusterDNS, auth) |
-| `/etc/kubernetes/kubelet.conf` | kubelet's kubeconfig → API server URL, client cert reference |
-| `/var/lib/kubelet/kubeadm-flags.env` | extra kubelet flags injected by kubeadm |
-| `/var/lib/kubelet/pki/kubelet-client-current.pem` | rotating client cert (symlink) |
-| `/etc/cni/net.d/` | CNI config the runtime loads |
-| `/opt/cni/bin/` | CNI plugin binaries |
+**Exam-flavor:** on kubeadm nodes the kubelet is a host systemd unit; use `sudo systemctl`. `/var/lib/kubelet/config.yaml` is the live config, `/etc/kubernetes/kubelet.conf` is the kubeconfig it uses to talk to the API. A NotReady node that comes back after `systemctl start kubelet` almost always needs `enable` too, because the task usually says "survive a reboot."
 
 ---
 
 ## Playbook 5 — Control plane down
 
-**Symptom:** `kubectl` errors (`connection refused`, TLS errors, timeouts) — or kubectl works but the cluster is "frozen": new pods never schedule, Deployments never reconcile.
+**Symptom:** `kubectl` hangs or returns `The connection to the server ... was refused`, or subtler: pods stay `Pending` forever (scheduler dead) / Deployments never create ReplicaSets (controller-manager dead) / everything is read-only-stale (etcd dead).
 
-This playbook has a prerequisite mental model: on kubeadm clusters the control plane runs as **static pods** — the kubelet on the control-plane node reads `/etc/kubernetes/manifests/*.yaml` (fsnotify, applies within seconds) and runs them directly. The API-server "pods" you see in `kube-system` are read-only **mirror pods**. Consequences:
+kubeadm control-plane components run as **static pods**: the kubelet on the control-plane node watches `/etc/kubernetes/manifests/` and runs whatever `*.yaml` it finds there. A single bad flag in one of those files makes that component crash-loop. Because the kubelet manages them directly, you cannot `kubectl edit` them — you edit the file on disk and the kubelet reconciles within seconds.
 
-- Deleting the mirror pod with kubectl does nothing durable — kubelet recreates it from the file.
-- One bad flag in a manifest = the container exits instantly and kubelet restarts it in a crash loop.
-- A YAML **syntax** error in a manifest = kubelet cannot parse it, so the pod silently *vanishes* — no container, no mirror pod, nothing in `crictl ps -a`. The only witness is the kubelet journal.
-
-**First 30 seconds (kubectl is dead — use the runtime directly):**
+**First 30 seconds — when kubectl is dead, use crictl (talks straight to containerd, no apiserver needed):**
 
 ```bash
-ssh CONTROLPLANE && sudo -i          # exam        | docker exec -it cka-control-plane bash  # kind
-crictl ps -a | grep -E 'kube-apiserver|etcd'       # -a: SHOW EXITED containers
-crictl logs --tail 30 CONTAINER_ID                 # the crash reason, verbatim
-journalctl -u kubelet --no-pager | tail -30        # manifest parse errors live here
-ls /etc/kubernetes/manifests/
+# from the control-plane node:
+docker exec cka-control-plane crictl ps -a | grep -E 'kube-apiserver|etcd|scheduler|controller'
+docker exec cka-control-plane crictl logs <container-id>        # the crash reason (paste the real id)
+docker exec cka-control-plane ls /etc/kubernetes/manifests/     # the four static pod manifests
+docker exec cka-control-plane journalctl -u kubelet -n 30 --no-pager   # kubelet's view of static pods
 ```
 
-If `crictl` complains about the endpoint: `crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -a`. Container logs also sit on disk at `/var/log/pods/kube-system_<pod>_<uid>/<container>/*.log` and `/var/log/containers/`.
+`crictl` may need the runtime endpoint if `/etc/crictl.yaml` is not set: `crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -a`. On kind it is preconfigured.
 
 **Decision path:**
 
 ```text
-kubectl: "connection refused"
-├── crictl ps -a → apiserver container Exited/restarting
-│   └── crictl logs <id>
-│       ├── "Error: unknown flag: --X"            → typo'd flag name in kube-apiserver.yaml
-│       ├── "invalid argument ... --X"            → flag value typo
-│       ├── open /etc/kubernetes/pki/...: no such file → wrong cert path (flag or hostPath volume)
-│       └── "dial tcp 127.0.0.1:2379: connect: connection refused"
-│             → etcd is the patient: crictl ps -a | grep etcd → crictl logs
-│               ├── etcd flag/datadir/cert typo in etcd.yaml
-│               └── disk full → df -h; etcd refuses to start or goes read-only (playbook 8)
-├── crictl ps -a → NO apiserver container at all
-│   ├── journalctl -u kubelet | grep -iE 'manifest|apiserver'
-│   │     → "could not process manifest" / YAML parse error → fix the file
-│   ├── manifest file missing/renamed             → restore into /etc/kubernetes/manifests/
-│   └── kubelet itself dead on the CP node        → playbook 4 on this node first
-└── apiserver Running & healthy but kubectl still fails → wrong kubeconfig/port/CA → playbook 7
-
-kubectl WORKS but the cluster is frozen
-├── new pods Pending, describe shows NO events    → kube-scheduler dead
-└── Deployment exists, no ReplicaSet / RS exists, no pods; scale does nothing
-                                                  → kube-controller-manager dead
-    Check either via:
-      k -n kube-system get pods                   # mirror pod missing or CrashLoopBackOff
-      k -n kube-system get lease                  # renewTime stale = component not renewing
-      crictl ps -a on the CP node + crictl logs   # exact flag error
+kubectl works?
+|
++-- NO (connection refused / timeout) -----------> apiserver or etcd is down
+|     crictl ps -a: is kube-apiserver present and NOT restarting?
+|       apiserver absent/looping -> crictl logs <apiserver>:
+|          "unknown flag --xxx" / "invalid value" -> typo in kube-apiserver.yaml manifest -> fix file
+|          "connection refused ... 2379" -> etcd is down -> fix etcd first (apiserver depends on it)
+|       etcd absent/looping -> crictl logs <etcd>: bad flag, wrong data-dir, or cert path -> fix manifest
+|     after fixing the file: kubelet re-creates the pod in ~15-30s; watch crictl ps
+|
++-- YES, but symptoms are indirect ---------------> scheduler or controller-manager is down
+      pods stuck Pending, describe shows NO events         -> kube-scheduler crash-looping
+      Deployments don't create pods / nodes not GC'd / SA  -> kube-controller-manager crash-looping
+      k get pods -n kube-system | grep -E 'scheduler|controller'   -> CrashLoopBackOff / not there
+      k logs -n kube-system kube-scheduler-cka-control-plane        -> the bad flag / cert / kubeconfig
 ```
 
-**Root causes ranked by frequency (exam):**
+**Root causes, ranked:**
 
-1. Deliberately typo'd flag in a static pod manifest (scheduler and apiserver are the usual victims).
-2. Wrong file path in a manifest — cert path, `--etcd-servers` port, hostPath volume.
-3. Manifest moved out of / missing from `/etc/kubernetes/manifests/`.
-4. etcd down (own manifest broken, or disk).
-5. kubelet on the control-plane node stopped (everything static disappears at once).
+1. **Typo in a static pod manifest** — a bad flag (`--leader-elect-and-hope=true`), wrong indentation, wrong `--etcd-servers`, wrong image tag. The kubelet dutifully runs the broken spec; the component crash-loops. Overwhelmingly the exam's control-plane break.
+2. **etcd down / wrong data-dir / cert path** — apiserver can't start ("connection refused to 2379"); fix etcd first, apiserver recovers on its own.
+3. **Certificate/kubeconfig problem** — a component's client cert expired or its `/etc/kubernetes/*.conf` points at the wrong CA/server.
+4. **Manifest moved/deleted** — someone `mv`'d `kube-scheduler.yaml` out of the manifests dir → the component simply vanishes (not crash-looping, just *gone*).
+5. **Port/host binding conflict** — rare; `--secure-port` collision.
 
 **Fix patterns:**
 
 ```bash
-vi /etc/kubernetes/manifests/kube-scheduler.yaml   # fix the flag; kubelet reloads in seconds
-# force a sluggish restart: move OUT of the dir, wait for the pod to die, move back
-mv /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/ && sleep 3 && mv /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/
-watch crictl ps                                    # confirm it stays up before touching kubectl
+# Localize which static pod is broken and why (kubectl-independent):
+docker exec cka-control-plane crictl ps -a | grep -E 'apiserver|etcd|sched|controller'
+docker exec cka-control-plane crictl logs --tail=25 <container-id>
+
+# Fix the manifest on disk; the kubelet reconciles automatically (no restart command needed)
+docker exec cka-control-plane vi /etc/kubernetes/manifests/kube-scheduler.yaml
+
+# Force a clean re-read if it seems stuck: move it out and back
+docker exec cka-control-plane sh -c 'mv /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/ && sleep 20 && mv /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/'
+
+# Once apiserver is back, confirm health:
+k get --raw='/readyz?verbose'
 ```
 
-Never park a backup copy **inside** `/etc/kubernetes/manifests/` — kubelet runs everything in that directory, backup included. Use `/root` or `/tmp`.
+**Trap:** you cannot `kubectl edit` a static pod — editing the mirror pod does nothing; edit the file in `/etc/kubernetes/manifests/`. And do not `crictl rm` the apiserver container hoping it restarts "clean" — the kubelet recreates it from the same (still-broken) manifest. Fix the *manifest*, not the container. Also: after fixing, give the kubelet 15-30s; impatience makes people "fix" a second thing that was never broken.
 
-etcd health check (paths per `/etc/kubernetes/manifests/etcd.yaml`):
+---
+
+## Playbook 6 — DNS failures
+
+**Symptom:** pods can reach Services by ClusterIP but not by name; `nslookup kubernetes.default` from a pod times out or `NXDOMAIN`; apps that dial `db.prod.svc` error with "no such host."
+
+Cluster DNS is CoreDNS: a Deployment (`coredns`, 2 replicas) in `kube-system`, fronted by a Service named `kube-dns` (historical name) at a fixed ClusterIP (usually `.10` in the service CIDR). Every pod's `/etc/resolv.conf` points `nameserver` at that ClusterIP, injected by the kubelet.
+
+**First 30 seconds:**
 
 ```bash
-ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
+k -n kube-system get pods -l k8s-app=kube-dns -o wide     # are CoreDNS pods Running and READY? (0 replicas?)
+k -n kube-system get deploy coredns                        # READY 0/0 means someone scaled it down
+k -n kube-system get svc kube-dns                          # ClusterIP present? endpoints?
+k -n kube-system logs -l k8s-app=kube-dns --tail=30        # CrashLoop? "plugin/... unknown directive"?
+```
+
+Then test resolution from a throwaway pod (ground truth):
+
+```bash
+k run dnstest --rm -it --image=busybox:1.36 --restart=Never -- \
+  nslookup kubernetes.default.svc.cluster.local
+```
+
+**Decision path:**
+
+```text
+CoreDNS pods
+|
++-- 0 replicas (deploy scaled to 0) -----------> k -n kube-system scale deploy coredns --replicas=2
+|
++-- CrashLoopBackOff ---------------------------> corrupt Corefile ConfigMap
+|     logs: "Corefile:N - Error ... unknown directive 'forwrad'" -> typo in the coredns ConfigMap
+|     fix: k -n kube-system edit configmap coredns  (fix the directive) -> pods self-heal
+|
++-- Running & Ready, but resolution still fails
+|     check kube-dns Service has the right ClusterIP + endpoints (the CoreDNS pod IPs)
+|     check a pod's /etc/resolv.conf nameserver == kube-dns ClusterIP
+|     check no NetworkPolicy in kube-system blocks port 53 UDP/TCP
+|
++-- resolves cluster names but not external -----> forward plugin / upstream (/etc/resolv.conf) issue
+```
+
+**Root causes, ranked:**
+
+1. **CoreDNS scaled to 0** — deploy `coredns` at `0/0`; nothing serves DNS. `scale --replicas=2`.
+2. **Corrupt Corefile ConfigMap** — a typo (`forwrad`), a bad `errors`/`ready` directive → CoreDNS crash-loops. Fix the `coredns` ConfigMap; the pods reload.
+3. **kube-dns Service broken** — wrong ClusterIP, deleted, or empty endpoints (its selector must match CoreDNS pod labels `k8s-app=kube-dns`).
+4. **resolv.conf / ndots** — pod `dnsPolicy` wrong, or upstream `forward . /etc/resolv.conf` loops. Less common on the exam.
+5. **NetworkPolicy blocking 53** — a default-deny in `kube-system` or the app namespace eating DNS.
+
+**Fix patterns:**
+
+```bash
+# The two most common CKA DNS fixes, back to back:
+k -n kube-system scale deploy coredns --replicas=2
+k -n kube-system edit configmap coredns          # fix the Corefile directive (e.g. forwrad -> forward)
+
+# CoreDNS reloads the ConfigMap on its own (reload plugin); to force, roll it:
+k -n kube-system rollout restart deploy coredns
+
+# Verify kube-dns has endpoints (CoreDNS pod IPs)
+k -n kube-system get endpoints kube-dns
+```
+
+**Trap:** the Service is named `kube-dns`, not `coredns` — the Deployment is `coredns`, the Service is `kube-dns`. Grepping for the wrong one wastes time. And CoreDNS pods `Running` with `nslookup` still failing usually means the **Service/endpoints** layer, not CoreDNS itself — test resolution against a CoreDNS pod IP directly to bisect pod-vs-service.
+
+---
+
+## Playbook 7 — kubeconfig / auth failures
+
+**Symptom:** `kubectl` errors before it can even do work: `connection refused`, `x509: certificate signed by unknown authority`, `Unauthorized (401)`, or it *works* but a specific action returns `Forbidden (403)`.
+
+A kubeconfig is three linked parts: **clusters** (server URL + CA to trust), **users** (client credentials — cert/key, token, or exec), and **contexts** (which user + cluster + namespace is current). A failure is almost always a mismatch in one of those three.
+
+**First 30 seconds:**
+
+```bash
+k config current-context                         # which context is even active?
+k config view --minify                            # the resolved cluster/user/namespace for it (redacted)
+k config view --minify --raw | grep -E 'server:|certificate-authority|client-certificate'  # real values
+k get nodes -v=7 2>&1 | head -20                  # verbose shows the exact HTTP/TLS failure
+```
+
+**Decision path — classify the error string, it names the layer:**
+
+```text
+error string
+|
++-- "connection refused" / "no route to host" / timeout -> TRANSPORT: wrong server host or port
+|     fix: correct clusters[].cluster.server (right host, right port, https)
+|
++-- "x509: certificate signed by unknown authority" ----> wrong/missing CA
+|     fix: point certificate-authority(-data) at the cluster's real CA
+|
++-- "x509: certificate has expired or is not yet valid" -> client cert expired (or clock skew)
+|     fix: renew the user cert (kubeadm certs renew, or re-issue via CSR); check date on node
+|
++-- "Unauthorized" (401) ------------------------------> AUTHN failed: bad/expired token or cert-CA mismatch
+|     the API does not know WHO you are -> credentials are wrong
+|
++-- "Forbidden" (403) ---------------------------------> AUTHN ok, AUTHZ failed: RBAC denies this verb
+      the API knows who you are, but you lack the (Cluster)Role/binding for this action -> RBAC
+```
+
+The 401-vs-403 split is the exam's favorite trick and the fastest triage you own:
+
+- **401 Unauthorized** = "I don't know who you are." Fix the *credential* (cert, key, token, CA).
+- **403 Forbidden** = "I know who you are, you're not allowed." Fix *RBAC* (Role/RoleBinding/ClusterRoleBinding). `k auth can-i <verb> <resource> --as=<user> -n <ns>` confirms it in one line.
+
+**Root causes, ranked:**
+
+1. **Wrong server host/port** — copied config pointing at the wrong endpoint → connection refused. Fix `server:`.
+2. **Wrong or unreachable CA** — `certificate-authority:` points at a path that doesn't exist on this host (e.g., a container-internal path), or embedded `-data` is for a different cluster → x509 unknown authority. Prefer embedded `certificate-authority-data` from a known-good config.
+3. **Expired client cert** — user cert past `notAfter` → x509 expired / 401.
+4. **RBAC too narrow** — 403 Forbidden on a specific verb/resource/namespace. Bind the right Role.
+5. **Wrong context/namespace** — everything's fine but you're pointed at the wrong cluster or namespace.
+
+**Fix patterns:**
+
+```bash
+# Repair a broken kubeconfig FILE in place (do not clobber ~/.kube/config)
+KCFG=/tmp/ops.kubeconfig
+kubectl --kubeconfig "$KCFG" config view --raw            # inspect what's wrong
+# kind publishes the API on a RANDOM host port, so derive the real server — never hard-code 6443:
+REAL_SERVER=$(kubectl config view --raw -o jsonpath='{.clusters[?(@.name=="kind-cka")].cluster.server}')
+kubectl --kubeconfig "$KCFG" config set-cluster kind-cka --server="$REAL_SERVER"
+kubectl --kubeconfig "$KCFG" config set-cluster kind-cka \
+  --certificate-authority=/path/to/ca.crt --embed-certs=true
+
+# Diagnose 401 vs 403 without guessing
+k auth can-i --list --as=dev -n prod            # what CAN this user do?
+k auth can-i create deployments --as=dev -n prod
+
+# Renew expired control-plane/client certs (kubeadm nodes)
+kubeadm certs check-expiration
+kubeadm certs renew all       # then restart control-plane static pods
+```
+
+**Trap:** `certificate-authority: /etc/kubernetes/pki/ca.crt` in a handed-over kubeconfig looks authoritative but that path only exists on the control-plane node — on your workstation it's a missing file, giving a load error, not an x509 error. Swap it for embedded `certificate-authority-data`. And never "fix" a 403 by editing credentials or a 401 by editing RBAC — you'll burn time on the wrong layer. The error string already told you which.
+
+---
+
+## Playbook 8 — etcd & data issues (awareness)
+
+**Symptom:** apiserver reports etcd unreachable; cluster state is stale or lost; the task explicitly says "back up etcd" or "restore the cluster from this snapshot." etcd is the single source of truth — every object lives there. If etcd is gone, the cluster's memory is gone.
+
+**Health & first look:**
+
+```bash
+# etcd is a DISTROLESS static pod; etcdctl is NOT on the kind node host, so exec INTO the etcd pod
+# (docker exec cka-control-plane etcdctl ... returns "etcdctl: not found"). ETCDCTL_API defaults to 3.
+kubectl -n kube-system exec etcd-cka-control-plane -- etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
   --cacert=/etc/kubernetes/pki/etcd/ca.crt \
   --cert=/etc/kubernetes/pki/etcd/server.crt \
   --key=/etc/kubernetes/pki/etcd/server.key \
   endpoint health
 ```
 
----
+The certs live in `/etc/kubernetes/pki/etcd/`. The three flags `--cacert/--cert/--key` are non-negotiable — etcd is mutually-TLS-authenticated; without them you get a connection error that looks like etcd is down when it is fine.
 
-## Playbook 6 — DNS failures
-
-**Symptom:** apps error with "no such host"; `nslookup kubernetes.default` fails from pods; Services work by ClusterIP but not by name.
-
-**First 30 seconds:**
+**Backup (snapshot):**
 
 ```bash
-k -n kube-system get deploy coredns                       # replicas? available?
-k -n kube-system get pods -l k8s-app=kube-dns             # Running? CrashLoopBackOff?
-k -n kube-system get svc kube-dns                         # ClusterIP (10.96.0.10 on this lab)
-k run dnstest --rm -it --image=busybox:1.36 --restart=Never -- \
-  nslookup kubernetes.default.svc.cluster.local
+kubectl -n kube-system exec etcd-cka-control-plane -- etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  snapshot save /var/lib/etcd-backup.db
 ```
 
-**How it's wired** (so the decision path makes sense): every `ClusterFirst` pod gets `/etc/resolv.conf` pointing at the `kube-dns` Service ClusterIP (the kubelet writes it from `clusterDNS` in `/var/lib/kubelet/config.yaml`), with search domains `<ns>.svc.cluster.local svc.cluster.local cluster.local` and `ndots:5`. That Service selects the CoreDNS pods; CoreDNS answers cluster zones from the API and forwards the rest per its Corefile (`forward . /etc/resolv.conf`). Break any link — pods, deployment scale, ConfigMap, Service, kube-proxy path, NetworkPolicy on port 53 — and "DNS is down".
-
-**Decision path:**
+**Restore (the exam pattern):** restore the snapshot to a *new* data directory, then repoint etcd's static pod at it.
 
 ```text
-nslookup fails from a test pod
-├── coredns pods not Running
-│   ├── 0 replicas                → k -n kube-system scale deploy coredns --replicas=2
-│   └── CrashLoopBackOff          → k -n kube-system logs -l k8s-app=kube-dns --previous
-│         └── "Corefile:N - Error during parsing: ..." → fix cm coredns → rollout restart
-├── pods Running → k -n kube-system get svc kube-dns   exists? ClusterIP = nameserver in pod resolv.conf?
-│   └── k -n kube-system get endpoints kube-dns        empty = selector/readiness problem
-├── endpoints fine → query a CoreDNS POD IP directly:
-│   nslookup kubernetes.default POD_IP
-│   ├── works → path pod→Service broken: kube-proxy (playbook 3) or NetworkPolicy blocking 53/UDP+TCP
-│   └── fails → CoreDNS config or its upstream
-├── only EXTERNAL names fail      → forward block / node /etc/resolv.conf upstream
-└── one pod affected, rest fine   → that pod's dnsPolicy (hostNetwork needs ClusterFirstWithHostNet)
-                                     or its node's kubelet clusterDNS
+1. etcdutl snapshot restore /backup/snap.db --data-dir /var/lib/etcd-restore
+   (etcd >=3.6: restore/status live in etcdutl, not etcdctl; etcd 3.5 still accepts
+    `etcdctl snapshot restore` with a deprecation warning. `snapshot save` stays in etcdctl.)
+2. edit /etc/kubernetes/manifests/etcd.yaml:
+     - change the hostPath volume for etcd data from /var/lib/etcd to /var/lib/etcd-restore
+       (OR restore INTO /var/lib/etcd after stopping etcd and moving the old dir aside)
+3. the kubelet restarts etcd from the new data-dir; apiserver reconnects
+4. verify: k get nodes ; k get pods -A   (state matches the snapshot's point in time)
 ```
 
-**Root causes ranked by frequency (exam):**
+**Root causes / notes, ranked:**
 
-1. Corefile in the `coredns` ConfigMap corrupted → pods crash on (re)start with a parse error.
-2. CoreDNS scaled to 0 or its pods evicted/pending.
-3. `kube-dns` Service deleted or selector mangled → empty endpoints.
-4. NetworkPolicy blocking UDP/TCP 53 egress from app namespaces.
-5. Wrong `clusterDNS` in kubelet config on one node (single-node symptom).
+1. **Restore requested** — the headline etcd task. Get the snapshot, `snapshot restore` to a new dir, repoint `etcd.yaml`, verify. Practice the exact flags cold.
+2. **etcd static pod broken** — bad flag / wrong `--data-dir` / cert path → apiserver can't reach 2379 → this is Playbook 5, fix the manifest.
+3. **Disk full on the control-plane** — etcd goes read-only (`mvcc: database space exceeded`); free space / compact.
+4. **Wrong certs in the etcdctl call** — not a cluster bug, a *your-command* bug; use the `/etc/kubernetes/pki/etcd/` certs.
 
-**Fix patterns:**
-
-```bash
-k -n kube-system edit configmap coredns          # fix the Corefile
-k -n kube-system rollout restart deploy coredns  # deterministic reload
-```
-
-Two timing traps: (1) CoreDNS ships the `reload` plugin — a *corrupted* ConfigMap does **not** kill running pods (they keep the last good config and log the error); it only bites when a pod restarts. So "DNS broke an hour after the change" is a restart, not the edit. (2) After you fix the ConfigMap, kubelet propagates ConfigMap volumes on a sync delay (up to ~1 min) and reload checks every ~30 s — `rollout restart` skips the wait.
+**Trap:** `snapshot restore` does **not** touch the running etcd; it writes a new data dir on disk. Nothing changes until you repoint etcd's manifest at that dir and the kubelet restarts the pod. Also `ETCDCTL_API=3` must be set (default on current etcd, but set it explicitly on the exam to be safe), and `snapshot save` needs a *running* etcd while `snapshot restore` is offline.
 
 ---
 
-## Playbook 7 — kubeconfig and auth failures
+## Monitoring & health surfaces
 
-**Symptom:** kubectl refuses to talk, or talks and gets told no. **The error string names the broken layer** — this playbook is a lookup table plus surgery.
+Three families of "what is actually happening right now" commands. Reach for them before you start editing anything.
 
-**First 30 seconds:**
-
-```bash
-kubectl config current-context
-kubectl config view --minify                      # server URL, CA, user for THIS context
-kubectl auth whoami                               # v1.28+: who does the server think you are
-```
-
-**Decision path — match the error text:**
-
-| Error contains | Layer | Diagnosis / fix |
-|---|---|---|
-| `connection refused` | TCP | wrong `server:` port, or API server down (playbook 5). Compare with a working kubeconfig; `ss -tlnp \| grep 6443` on the CP node |
-| `no such host` / timeout | DNS/route | wrong hostname/IP in `server:` |
-| `x509: certificate signed by unknown authority` | server TLS | wrong CA in `certificate-authority(-data)`, or `server:` points at a different cluster |
-| `unable to read certificate-authority ... no such file` | file path | kubeconfig references a CA file that isn't there — re-embed data or fix the path |
-| `x509: certificate has expired or is not yet valid` | client cert | expired user/component cert → `kubeadm certs check-expiration`, `kubeadm certs renew <name>` |
-| `Unauthorized` (401) | authentication | bad/expired token, client cert not signed by the cluster CA — who you are failed |
-| `error: You must be logged in` | authentication | same family as 401 |
-| `Forbidden` (403) | authorization | authn succeeded; RBAC says no — grant or use the right account |
-
-**401 vs 403 is a classic point-loser:** 401 means the server doesn't know who you are (fix credentials); 403 means it knows exactly who you are and you lack RBAC (fix Role/RoleBinding). They are different subsystems — do not debug RBAC on a 401.
-
-**RBAC surgery kit:**
+**Resource pressure — `kubectl top` (needs metrics-server; on kind it may be absent, that's expected):**
 
 ```bash
-k auth can-i list pods -n NS --as=system:serviceaccount:NS:SA     # simulate before and after
-k auth can-i --list -n NS --as=system:serviceaccount:NS:SA        # full capability dump
-k -n NS create role pod-reader --verb=get,list,watch --resource=pods
-k -n NS create rolebinding pod-reader-b --role=pod-reader --serviceaccount=NS:SA
+k top nodes                          # CPU/memory per node — find the saturated one
+k top pods -A --sort-by=memory       # the memory hog behind an OOMKill or eviction
+k top pods -n prod --containers      # per-container within a pod
 ```
 
-Cert inspection when kubeconfig embeds data:
+**Events firehose — the cluster narrating its own failures in time order:**
 
 ```bash
-k config view --raw -o jsonpath='{.users[0].user.client-certificate-data}' \
-  | base64 -d | openssl x509 -noout -subject -enddate
+k get events -A --sort-by=.lastTimestamp | tail -40      # everything, newest last
+k get events -n prod --field-selector type=Warning        # just the warnings
+k get events -n prod --field-selector involvedObject.name=api   # one object's story
+k get events -A -w                                         # live tail while you reproduce
 ```
 
-Subject `CN` = username, `O` = groups — that is how RBAC sees a cert user.
-
-**Root causes ranked by frequency (exam):**
-
-1. Wrong port/server in a provided kubeconfig ("this config doesn't work, fix it").
-2. 403 tasks: ServiceAccount lacking a Role/RoleBinding you must author.
-3. Wrong/missing CA (path or data) in a copied kubeconfig.
-4. Expired certs (`kubeadm certs check-expiration` scenario).
-5. Using the wrong context entirely — self-inflicted.
-
----
-
-## Playbook 8 — etcd and data-layer issues (awareness level)
-
-The exam rarely asks you to *repair* etcd beyond restore-from-snapshot (week 05 owns that drill), but etcd failures masquerade as API-server failures and you must recognize the costume.
-
-**Symptoms and signatures:**
-
-| Symptom | Signature |
-|---|---|
-| API server crash-looping | apiserver logs: `dial tcp 127.0.0.1:2379: connect: connection refused` — etcd is down, apiserver is the messenger |
-| kubectl slow / timeouts, writes fail | etcd disk latency or quota; etcd logs mention `apply entries took too long` |
-| Writes rejected: `etcdserver: mvcc: database space exceeded` | quota hit → `etcdctl alarm list` shows NOSPACE → compact + defrag + `alarm disarm` |
-| etcd container exiting | its own manifest broken (`/etc/kubernetes/manifests/etcd.yaml`: data-dir, cert paths, `--listen-client-urls`), or disk full (`df -h /var/lib/etcd`) |
-
-**First checks:** `crictl ps -a | grep etcd`, `crictl logs <id>`, `df -h`, then the `etcdctl endpoint health` command from playbook 5. If data is truly gone or corrupt: snapshot restore (`etcdctl snapshot restore --data-dir=/var/lib/etcd-new`, repoint the manifest's hostPath) — full procedure in week 05.
-
-One prevention habit worth points elsewhere: before touching control-plane manifests, `cp` them to `/root/` — that is your own instant "snapshot".
-
----
-
-## Monitoring — top, events, component health
-
-**`kubectl top`** needs metrics-server (exam clusters have it; kind does not by default):
+**Component health — the API's own readiness probes (the fastest control-plane triage that exists):**
 
 ```bash
-k top nodes
-k top pods -A --sort-by=memory                   # --sort-by cpu|memory
-k top pods -n NS --containers                    # per-container breakdown
-# kind lab only — install metrics-server:
-k apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-k -n kube-system patch deploy metrics-server --type=json \
-  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+k get --raw='/readyz?verbose'        # every apiserver readiness check, line by line (etcd, informers, ...)
+k get --raw='/livez?verbose'         # liveness variant
+k get --raw='/healthz'               # legacy single-line ok/not-ok
+k get --raw='/readyz/etcd'           # a single check by name
 ```
 
-"Find the top consumer and write its name to a file" is a free-points task — practice the exact flags. `Metrics API not available` means metrics-server is absent/broken, not that the cluster is sick.
+`/readyz?verbose` prints one `[+]check ok` line per subsystem and a final `readyz check failed` if any failed — it tells you *which* dependency (etcd, an admission webhook, an informer) is dragging the apiserver down, without leaving kubectl. Scheduler and controller-manager expose their own `/healthz` on `127.0.0.1:10259` and `:10257` respectively (query from the control-plane node with `curl -k https://127.0.0.1:10259/healthz`).
 
-**Events firehose** — events are the cluster's own diagnosis, 1-hour TTL by default:
+Legacy but instant when you just need a yes/no on the trio:
 
 ```bash
-k get events -A --sort-by=.lastTimestamp | tail -30
-k get events -A --field-selector type=Warning
-k events -n NS --for pod/PODNAME --types=Warning     # scoped view, modern subcommand
-k get events -A -w                                   # live tail while you reproduce
+k get componentstatuses            # scheduler/controller-manager/etcd Healthy? (deprecated, still answers)
 ```
-
-**Component health endpoints:**
-
-```bash
-k get --raw='/readyz?verbose'      # apiserver readiness, per-check: [+]etcd ok, [+]poststarthook/... ok
-k get --raw='/livez?verbose'       # liveness variant; /healthz is deprecated
-k -n kube-system get lease         # scheduler/controller-manager alive? stale renewTime = dead
-```
-
-`readyz` includes the etcd check — the fastest proof that "apiserver up, etcd down". On a node, scheduler and controller-manager also answer locally: `curl -k https://localhost:10259/healthz` (scheduler) and `:10257` (controller-manager). `kubectl get componentstatuses` is deprecated and unreliable — use leases and the raw endpoints instead.
 
 ---
 
 ## Traps
 
-Each trap: the wrong assumption, then the correction.
+Each trap is a specific wrong assumption that costs points, and its correction.
 
-1. **"I deleted the broken kube-scheduler pod and it came back broken."** It's a mirror of a static pod; the API copy is a shadow. Edit `/etc/kubernetes/manifests/kube-scheduler.yaml` on the node.
-2. **"I'll back the manifest up right here."** A copy left in `/etc/kubernetes/manifests/` is *executed* — kubelet runs every manifest in the dir. Back up to `/root` or `/tmp`.
-3. **"Logs are empty, the container logs nothing."** You read the *current* (freshly restarted) attempt. `k logs POD --previous` shows the attempt that crashed.
-4. **"Exit 137 = OOMKilled."** 137 is any SIGKILL: OOM, liveness-kill escalation, eviction. Check `lastState.terminated.reason` and events before writing "OOM" — the fix differs completely.
-5. **"Readiness probe fails, so it'll restart soon."** Readiness never restarts anything; it only pulls the pod from endpoints. Only liveness restarts. Misdiagnosing this wastes a rollout.
-6. **"Endpoints empty ⇒ selector wrong."** Equally often the selector is fine and pods are simply not Ready (probe failing) — check the READY column before rewriting the Service.
-7. **"Traffic still flows, so kube-proxy must be fine."** Existing iptables rules survive kube-proxy's death; only *new* Services break. "Old svc works, new svc dead" ⇒ kube-proxy.
-8. **"I fixed the CoreDNS ConfigMap; why is DNS still broken?"** ConfigMap propagation (~1 min) plus reload interval (~30 s). `rollout restart` and stop waiting. Inverse trap: corrupting the Corefile doesn't break *running* pods (reload keeps last-good) — it detonates on the next pod restart.
-9. **"NotReady ⇒ restart kubelet."** Ready=**False** means kubelet is alive and telling you the cause (usually CNI/runtime) in the condition message; restarting kubelet is noise. Ready=**Unknown** is the kubelet-down case.
-10. **"Pod Pending ⇒ resources or taints."** Zero events on describe means it never met the scheduler — the scheduler itself is down. Ten minutes of taint-hunting won't fix a dead scheduler.
-11. **"401 vs 403, whatever."** 401 = authn (credentials), 403 = authz (RBAC). Debugging RBAC on a 401 is unfixable by design.
-12. **"The static pod vanished — someone deleted it."** A YAML syntax error makes kubelet skip the manifest silently: no container, no mirror pod, nothing in `crictl ps -a`. Only `journalctl -u kubelet` testifies.
-13. **"Quota exceeded — but describe shows nothing."** Admission rejected the pod, so there's no pod to describe. The complaint lives in the ReplicaSet: `k describe rs`.
-14. **"Fixed the deployment, pod still CrashLoopBackOff."** You're waiting out restart backoff (up to 5 m). `k delete pod` — the controller recreates instantly with a clean backoff.
-15. **"I fixed the node but forgot persistence."** Tasks say "ensure it survives reboot": that's `systemctl enable --now`, not just `start`. Graders check enablement.
-16. **"I ssh'd to the node and kept working."** Run `exit` (twice: sudo shell, then ssh) before the next task — kubectl on a worker node either fails or, worse, talks to the wrong cluster with a stale kubeconfig.
+- **Wrong:** "Pending means the scheduler can't fit it." **Right:** Pending with `NODE` already assigned means the *kubelet* is stuck (image/volume/secret). Read events, not scheduler capacity.
+- **Wrong:** "The current logs will show why it crashed." **Right:** a CrashLooping pod's current logs are from the fresh restart; the crash is in `logs --previous`. Without `--previous` you're reading an empty or misleading log.
+- **Wrong:** "Running == healthy." **Right:** `Running` with `0/1 READY` fails readiness and is pulled from Service endpoints — the app looks dead through its Service while the pod looks fine.
+- **Wrong:** "I'll `kubectl edit` the apiserver to fix its flag." **Right:** control-plane components are static pods; `kubectl edit` on the mirror pod does nothing. Edit the file in `/etc/kubernetes/manifests/` on the node.
+- **Wrong:** "`Endpoints: <none>` means the pods are down." **Right:** it usually means the Service selector doesn't match the pod labels, or the pods are unready. The pods can be perfectly healthy.
+- **Wrong:** "403 Forbidden = bad credentials." **Right:** 403 = authenticated but not authorized → fix RBAC. 401 = not authenticated → fix the credential. Never cross the streams.
+- **Wrong:** "The DNS Deployment is called `kube-dns`." **Right:** the Deployment is `coredns`; the Service is `kube-dns`. Scale/log the Deployment, verify endpoints on the Service.
+- **Wrong:** "kubelet `start` fixes the NotReady node for good." **Right:** if the task says "survive a reboot," you also need `systemctl enable`. A start without enable regresses on the next boot.
+- **Wrong:** "`snapshot restore` brings the cluster back immediately." **Right:** it only writes a new data dir; you must repoint etcd's manifest at it and let the kubelet restart the pod.
+- **Wrong:** "`crictl rm` the crashing static-pod container to reset it." **Right:** the kubelet recreates it from the same broken manifest. Fix the manifest; the container is a symptom.
+- **Wrong:** "A missing CNI is an apiserver problem because pods say ContainerCreating." **Right:** ContainerCreating + `cni ... uninitialized` in node/kubelet logs is a *node-local* CNI fault. Fix `/etc/cni/net.d` and the runtime on that node.
 
 ---
 
 ## Speed patterns
 
-The exam-legal fastest route for each recurring move (docs allowed, but you shouldn't need them for these):
+The fastest exam-legal way to do each recurring troubleshooting move.
 
-```bash
-# 0. Every task, no exceptions
-kubectl config use-context NAME
+| Need | Fastest command |
+|---|---|
+| Cluster-wide "what's broken" | `k get pods -A -o wide \| grep -vE 'Running\|Completed'` |
+| One pod's full story | `k describe pod <p> -n <ns>` (read Events bottom-up) |
+| Why it crashed | `k logs <p> -n <ns> --previous` (add `-c <ctr>` for multi-container) |
+| Why it won't schedule | `k get events -n <ns> --field-selector reason=FailedScheduling` |
+| Service dead? | `k describe svc <s> -n <ns> \| grep -i endpoints` |
+| Node broken — get on it | `docker exec -it <node> bash` (exam: `ssh node01 && sudo -i`) |
+| kubelet's own errors | `journalctl -u kubelet -n 40 --no-pager` |
+| kubectl is dead, inspect containers | `crictl ps -a` then `crictl logs <id>` |
+| Static pod broke the control plane | edit `/etc/kubernetes/manifests/<comp>.yaml`, wait ~20s |
+| apiserver readiness detail | `k get --raw='/readyz?verbose'` |
+| Force a static pod re-read | `mv <manifest> /tmp/ && sleep 20 && mv /tmp/<manifest> back` |
+| 401 vs 403 | `k auth can-i <verb> <res> --as=<user> -n <ns>` |
+| Throwaway test client | `k run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh` |
+| Delete a wedged pod now | `k delete pod <p> -n <ns> $now` (i.e. `--grace-period=0 --force`) |
+| Watch recovery | `k get nodes -w` / `k get pods -n <ns> -w` |
 
-# 1. Cluster-wide triage in three lines
-k get nodes ; k get pods -A | grep -vE 'Running|Completed'
-k get events -A --sort-by=.lastTimestamp | tail -20
+Two meta-patterns worth the muscle memory:
 
-# 2. Broken-pod inner loop (describe tail → previous logs → exit code)
-k -n NS describe pod POD | tail -20
-k -n NS logs POD --previous --tail=30
-k -n NS get pod POD -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'
-
-# 3. Service chain in four commands (svc → ep → labels → live test)
-k -n NS get svc SVC -o wide ; k -n NS get ep SVC
-k -n NS get pods --show-labels
-k run tmp --rm -it --image=busybox:1.36 --restart=Never -- wget -qO- --timeout=2 http://SVC.NS
-
-# 4. Node ritual (exam nodes: ssh + sudo; kind: docker exec)
-ssh NODE ; sudo -i
-systemctl is-active kubelet containerd
-journalctl -u kubelet --no-pager | tail -50
-systemctl enable --now kubelet ; exit ; exit
-
-# 5. Control-plane ritual when kubectl is dead
-crictl ps -a | grep -E 'apiserver|etcd|scheduler|controller'
-crictl logs --tail 30 CONTAINER_ID
-journalctl -u kubelet --no-pager | grep -i manifest | tail
-vi /etc/kubernetes/manifests/BROKEN.yaml
-
-# 6. Force a static pod restart (kubelet slow to notice an edit)
-mv /etc/kubernetes/manifests/X.yaml /tmp/ && sleep 3 && mv /tmp/X.yaml /etc/kubernetes/manifests/
-
-# 7. DNS proof in one line
-k run dnstest --rm -it --image=busybox:1.36 --restart=Never -- nslookup kubernetes.default.svc.cluster.local
-
-# 8. RBAC verify-first, verify-after
-k auth can-i VERB RESOURCE -n NS --as=system:serviceaccount:NS:SA
-
-# 9. Answer-file tasks — never hand-copy
-k top pods -n NS --sort-by=cpu | head -2 | tail -1 | awk '{print $1}' > /opt/answer.txt
-
-# 10. Immutable pod field? Don't fight edit:
-k -n NS get pod POD -o yaml > /tmp/p.yaml && vi /tmp/p.yaml && k replace --force -f /tmp/p.yaml
-```
-
-Time discipline: troubleshooting tasks are the heaviest in the exam — budget ~8 minutes, flag anything that exceeds 10 and move on (PSI's interface has a flag button; use it). A dead control plane you can't crack in 10 minutes is worth fewer points than three Service fixes you skipped for it. On the PSI remote desktop, copy/paste is Ctrl+Shift+C / Ctrl+Shift+V in the terminal — practice it in killer.sh so it's muscle memory, not friction.
+- **`k get events -A --sort-by=.lastTimestamp | tail -40`** first, on almost every task. It surfaces the failing component and its reason before you've even named the object.
+- **Bisect inward, never outward.** App (POD_IP) → Service (ClusterIP) → DNS (name). Test the innermost layer first; the first layer that fails is your fault domain. Fixing outer layers on an inner-layer bug is the #1 time sink.
 
 ---
 
 ## Docs map
 
-What you'll actually open mid-exam (kubernetes.io unless noted). Bookmarks aren't allowed; the search box plus these paths are your index.
+Everything below is reachable in-browser during the exam from `kubernetes.io/docs`. Know the *path*, not the URL — rehearsed navigation beats search.
 
-| You need | Path |
+| What you need | Exact docs path |
 |---|---|
-| Pod debugging flowchart (Pending/Crash/ImagePull) | /docs/tasks/debug/debug-application/debug-pods/ |
-| `kubectl debug`, ephemeral containers, node debug | /docs/tasks/debug/debug-application/debug-running-pod/ |
-| Service debugging checklist (endpoints, ports) | /docs/tasks/debug/debug-application/debug-service/ |
-| DNS debugging (dnsutils pod, CoreDNS logs) | /docs/tasks/administer-cluster/dns-debugging-resolution/ |
-| Node/cluster-level debugging | /docs/tasks/debug/debug-cluster/ |
-| crictl usage + docker-CLI mapping | /docs/tasks/debug/debug-cluster/crictl/ |
-| Resource metrics / `kubectl top` pipeline | /docs/tasks/debug/debug-cluster/resource-metrics-pipeline/ |
-| kubeadm troubleshooting (certs, kubelet, ports) | /docs/setup/production-environment/tools/kubeadm/troubleshooting-kubeadm/ |
-| Cert expiry / renewal (`kubeadm certs`) | /docs/tasks/administer-cluster/kubeadm/kubeadm-certs/ |
-| Static pods | /docs/tasks/configure-pod-container/static-pod/ |
-| Kubelet config file options | /docs/tasks/administer-cluster/kubelet-config-file/ |
-| Probe syntax (liveness/readiness/startup) | /docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/ |
-| NetworkPolicy recipes | /docs/concepts/services-networking/network-policies/ |
-| RBAC (Role/Binding matrices) | /docs/reference/access-authn-authz/rbac/ |
-| API health endpoints (readyz/livez) | /docs/reference/using-api/health-checks/ |
-| etcd backup/restore | /docs/tasks/administer-cluster/configure-upgrade-etcd/ |
+| Debug Pods (Pending, CrashLoop, describe) | Tasks → Monitor, Log, and Debug → Debug Pods |
+| Debug Running Pods (exec, ephemeral containers) | Tasks → Monitor, Log, and Debug → Debug Running Pods |
+| Debug Services (endpoints, selectors) | Tasks → Monitor, Log, and Debug → Debug Services |
+| Debug DNS resolution | Tasks → Monitor, Log, and Debug → Debugging DNS Resolution |
+| Debug cluster / node problems | Tasks → Monitor, Log, and Debug → Troubleshoot Clusters |
+| Static Pods (control-plane manifests) | Tasks → Configure Pods and Containers → Create static Pods |
+| kubelet config file reference | Reference → Config APIs → kubelet configuration (v1beta1) |
+| etcd backup & restore | Tasks → Administer a Cluster → Operating etcd / Backing up an etcd cluster |
+| Certificates & kubeconfig | Tasks → Administer a Cluster → Certificate management with kubeadm; Reference → kubeconfig |
+| RBAC (401/403) | Reference → Access Authn Authz → RBAC; Using RBAC Authorization |
+| Resource metrics (top) | Tasks → Monitor, Log, and Debug → Resource metrics pipeline |
+| Node conditions / pressure | Reference → Nodes → Node Status |
+| kubectl cheat sheet (jsonpath, field-selectors) | Reference → kubectl → kubectl Cheat Sheet |
 
 ---
 
 ## Checkpoint
 
-Run these against the kind lab (use `labs/breakfix/` to arm real breakage). Honest timing, no peeking:
+Self-test with time targets. If you can't hit these cold, drill the matching `labs/breakfix` script until you can.
 
-- Can you triage "something is broken somewhere" to the owning playbook in **2 minutes** using only the universal-first-minute commands?
-- Can you take a Pending pod to Running (taint or resources) in **4 minutes**, including the immutable-field replace dance?
-- Can you diagnose a CrashLoopBackOff to its exact cause (probe vs config ref vs command vs OOM) in **5 minutes**, citing the exit code?
-- Can you fix an empty-endpoints Service (selector or targetPort) and prove it with an in-cluster wget in **5 minutes**?
-- Can you bring a NotReady node (kubelet stopped + disabled) back, persistently, in **5 minutes** — and state whether it was Ready=Unknown or Ready=False before you touched it?
-- Can you recover a dead API server (typo'd manifest flag) using only crictl + journal + vi in **10 minutes**?
-- Can you spot "scheduler down" from a Pending pod with no events in **1 minute**?
-- Can you restore cluster DNS (crashlooping CoreDNS with a corrupt Corefile) in **7 minutes**?
-- Can you repair a broken kubeconfig (wrong port + bad CA reference) in **6 minutes**?
-- Can you classify 401 vs 403 instantly and fix the 403 with an imperative Role+RoleBinding in **4 minutes**?
-- Can you name the top-CPU pod in a namespace into a file in **90 seconds**?
-- Can you check apiserver readiness including its etcd check with one command in **30 seconds**?
+- Can you, in **2 minutes**, take a Pending pod and name the exact reason (resources / taint / affinity / PVC) from events alone?
+- Can you, in **3 minutes**, diagnose a CrashLoopBackOff to a specific cause using `describe` + `logs --previous` and apply the fix?
+- Can you, in **3 minutes**, decide whether an unreachable app is a selector, port, readiness, or DNS problem by bisecting POD_IP → ClusterIP → name?
+- Can you, in **5 minutes**, bring a NotReady node back to Ready from the node itself (kubelet down, config broken, or CNI missing) *and* make the fix survive a reboot?
+- Can you, in **5 minutes**, restore a crashed control plane by finding the bad static-pod manifest with `crictl` and correcting the file — with `kubectl` dead the whole time?
+- Can you, in **3 minutes**, restore cluster DNS when CoreDNS is scaled to 0 *and* its ConfigMap is corrupt?
+- Can you, in **2 minutes**, classify an auth failure as 401 vs 403 and fix the correct layer (credential vs RBAC)?
+- Can you, in **5 minutes**, take an etcd snapshot and restore it to a new data-dir, repointing the static pod?
+- Can you, in **30 seconds**, read `/readyz?verbose` and name which apiserver dependency is failing?
 
-Anything over target: re-run the matching playbook and the matching break script until it isn't.
+Pass mark on the real exam is 66%. Troubleshooting is 30% of it. If you own these nine, you have already banked the domain that decides pass/fail — and you'll clear the networking, storage, and architecture tasks that arrive wearing troubleshooting clothes.
