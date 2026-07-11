@@ -1,5 +1,8 @@
 # Week 03 Masterclass — Scheduling (Workloads & Scheduling 15% · a large slice of Troubleshooting 30% when the symptom is "Pending" · cordon/drain and static pods graded under Cluster Architecture 25%)
 
+> 🧭 **Learning path:** [‹ week-02-workloads-config](../week-02-workloads-config/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-04-lifecycle-observability ›](../week-04-lifecycle-observability/masterclass.md)
+
+
 Scheduling is a small explicit slice of the blueprint (part of Workloads & Scheduling, 15%) but it is over-represented in what actually costs points, because a pod that will not leave `Pending` is a scheduling problem wearing a troubleshooting costume, and troubleshooting is 30%. `drain`/`cordon` and static pods are graded under Cluster Architecture (25%) as prerequisites for node maintenance and kubeadm upgrades. Master the pipeline once and both the "make this pod land on that node" build tasks and the "why won't this schedule" forensic tasks collapse into the same mental model: filter, score, bind — then read the events. This module covers the scheduler internals, every placement primitive (`nodeName`, `nodeSelector`, node/pod affinity, taints/tolerations, topology spread), disruption control (cordon/drain/PDB), static pods, PriorityClass/preemption, and multi-scheduler awareness. Behavior noted as version-dependent should be re-checked against the current exam Kubernetes version on the CNCF curriculum page.
 
 ---

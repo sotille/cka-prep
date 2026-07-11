@@ -1,5 +1,8 @@
 # Week 06 — Security & RBAC Masterclass (Cluster Architecture 25%, feeds Troubleshooting 30%)
 
+> 🧭 **Learning path:** [‹ week-05-cluster-maintenance](../week-05-cluster-maintenance/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-07-storage ›](../week-07-storage/masterclass.md)
+
+
 RBAC is the single most predictable scoring opportunity on the CKA. Almost every sitting includes at least one "create a Role/ClusterRole and bind it" task and one "user X gets Forbidden, fix it" task, and both are fully verifiable in-exam with `kubectl auth can-i` — you can *know* you scored the points before moving on. This module covers the API server's authn → authz → admission pipeline, RBAC internals, the CSR-based user onboarding flow, ServiceAccounts, SecurityContext, and Pod Security Admission. NetworkPolicy is deliberately deferred to week 08 (Services & Networking), where it belongs on the current curriculum.
 
 One version caveat up front: everything here targets the post-Feb-2025 curriculum. Check the live competency list at the CNCF curriculum page before exam day.

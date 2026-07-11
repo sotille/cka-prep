@@ -1,5 +1,8 @@
 # Week 07 — Storage Masterclass (Storage 10%, feeds Troubleshooting 30% and Workloads & Scheduling 15%)
 
+> 🧭 **Learning path:** [‹ week-06-security-rbac](../week-06-security-rbac/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-08-networking ›](../week-08-networking/masterclass.md)
+
+
 Storage is the smallest scored domain (10%) but the highest points-per-minute if you have the small YAML shapes memorized, because unlike RBAC there is **no imperative generator for PVs, PVCs, or StorageClasses** — `kubectl create pv` does not exist. The exam pays you for knowing four tiny manifests cold and for reading three fields off `kubectl describe pvc`. The other half of the value is diagnostic: a "PVC stuck Pending" or "pod stuck ContainerCreating" scenario lands in the 30% Troubleshooting domain, and volume mounts (configMap/secret/emptyDir/projected) are half of the 15% Workloads domain. This module covers the ephemeral volume layer, the static PV/PVC binding algorithm, dynamic provisioning and StorageClass internals, access modes, reclaim policies, expansion, block vs filesystem, local vs hostPath, CSI, and StatefulSet claim templates — with the kind lab's `rancher.io/local-path` default class as the live demo rig.
 
 Version caveat up front: everything targets the post-Feb-2025 curriculum on Kubernetes v1.33+ (the lab runs v1.36). Dynamic provisioning, expansion, and CSI awareness are curriculum additions. Confirm the live competency list on the CNCF curriculum page before exam day.

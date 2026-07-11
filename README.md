@@ -38,12 +38,18 @@ Legend: ⚪ pending · 🟡 in progress · ✅ done
 
 ## 📘 The Deep Course
 
-Deep-dive masterclasses (internals, failure modes, exam traps, speed patterns) + exam-style exercises with full worked solutions, break-and-fix labs, three timed mock exams, and daily speed drills. Content is exam-current; the `notes/` files remain as a personal daily-log skeleton and each links to its deep module.
+Deep-dive masterclasses (internals, failure modes, exam traps, speed patterns) + exam-style exercises with full worked solutions, break-and-fix labs, three timed mock exams with an **auto-grader**, daily speed drills, flashcards, and a **basic → advanced learning path**. Content is exam-current; the `notes/` files remain as a personal daily-log skeleton and each links to its deep module.
 
-**Start here → [Exam Masterclass: passing mechanics](course/00-exam-masterclass.md)** — domain weights, PSI exam environment, time-triage, question-pattern recipes, docs-navigation, 6-week countdown, and the full curriculum coverage map.
+**The ramp (basic → advanced → exam-ready):**
+1. **[Take the diagnostic](course/diagnostic.md)** (45 min, timed) — find your baseline; it routes you to the right starting tier.
+2. **[Follow the Learning Path](course/LEARNING-PATH.md)** — the tiered spine: Fundamentals → Core → Advanced → Troubleshooting → Simulation, with prerequisites and per-tier instructions. Every masterclass has a prev/next nav line.
+3. **[Read the Exam Masterclass](course/00-exam-masterclass.md)** — passing mechanics: domain weights, PSI environment, time-triage, question-pattern recipes, docs-navigation, 6-week countdown, coverage map.
+
+Daily, from the first module on: **[flashcards](drills/flashcards.md)** (active recall, 160 cards; [Anki CSV](drills/flashcards.csv)) and the **[mastery tracker](progress/mastery-tracker.md)** (mark every competency 🔴/🟡/🟢).
 
 | # | Module | Domain (weight) | Masterclass | Exercises |
 |---|---|---|---|---|
+| 0 | **Fundamentals & lab bootstrap** (entry ramp) | speed foundation | [masterclass](course/week-00-fundamentals/masterclass.md) | [exercises](course/week-00-fundamentals/exercises.md) |
 | 1 | Architecture & API machinery | Cluster Arch (25%) | [masterclass](course/week-01-architecture/masterclass.md) | [exercises](course/week-01-architecture/exercises.md) |
 | 2 | Workloads, Config, Helm & Kustomize | Workloads (15%) | [masterclass](course/week-02-workloads-config/masterclass.md) | [exercises](course/week-02-workloads-config/exercises.md) |
 | 3 | Scheduling | Workloads (15%) | [masterclass](course/week-03-scheduling/masterclass.md) | [exercises](course/week-03-scheduling/exercises.md) |
@@ -72,7 +78,29 @@ Scripts that intentionally break the kind lab cluster so you practice diagnosis 
 
 Each mock has a blind setup script (run it first, don't read it — it seeds the broken/pre-existing resources), per-task weights summing to 100 % across the five domains, and a solutions file with full YAML + partial-credit rubric.
 
-Validate all course YAML/scripts anytime with [`scripts/validate-course.sh`](scripts/validate-course.sh).
+**Run a mock like the real thing** — seed + 2-hour timer, then auto-grade on final cluster state:
+
+```bash
+mock/run.sh 2       # seeds mock 2 and starts the 120-min countdown
+mock/grade.sh 2     # scores it on final state: per-check ✓/✗, domain subtotals, total vs 66%
+```
+
+The grader ([`mock/grade.sh`](mock/grade.sh)) checks the real end-state of every task (objects, fields, endpoints, files) and prints a weighted score by domain. Mock 3 is killer-calibrated (pass line 55).
+
+### Lab automation
+
+Stop hand-plumbing the lab — these set it up so lab time goes to practice:
+
+- [`labs/setup/bootstrap-cluster.sh`](labs/setup/bootstrap-cluster.sh) — create the 3-node kind cluster `cka` if missing
+- [`labs/setup/install-addons.sh`](labs/setup/install-addons.sh) — metrics-server, ingress-nginx, Gateway API CRDs (idempotent)
+- [`labs/setup/reset-cluster.sh`](labs/setup/reset-cluster.sh) — fast reset between labs (drops lab namespaces, repairs injected node faults)
+- [`labs/setup/calico-netpol-cluster.sh`](labs/setup/calico-netpol-cluster.sh) — a **second** cluster that actually *enforces* NetworkPolicy (kindnet doesn't), for real netpol testing
+
+### After CKA → CKS
+
+[course/cks-bridge](course/cks-bridge/README.md) — roadmap into the Certified Kubernetes Security Specialist: what carries over, what's net-new (Falco, Trivy, kube-bench, AppArmor/seccomp, gVisor, Kyverno, audit logging, image signing), and a dated Aug→Dec 2026 plan.
+
+Validate all course YAML/scripts anytime with [`scripts/validate-course.sh`](scripts/validate-course.sh) (181 YAML blocks + 24 shell scripts).
 
 ---
 
@@ -85,12 +113,20 @@ cka-prep/
 ├── cheatsheet.md        ← personal kubectl cheatsheet (grows over time)
 ├── kind-config.yaml     ← local lab cluster config
 ├── course/              ← 📘 the deep course
-│   ├── 00-exam-masterclass.md         ← passing mechanics + coverage map
-│   └── week-01..10-*/                 ← masterclass.md + exercises.md per module
+│   ├── diagnostic.md                   ← placement test (take first)
+│   ├── LEARNING-PATH.md                ← tiered basic→advanced spine
+│   ├── 00-exam-masterclass.md          ← passing mechanics + coverage map
+│   ├── week-00-fundamentals/           ← entry ramp (kubectl/YAML speed)
+│   ├── week-01..10-*/                  ← masterclass.md + exercises.md per module
+│   └── cks-bridge/                     ← roadmap into CKS
 ├── mock-exams/          ← 3 timed mock exams (paper + solutions + setup script)
-├── labs/breakfix/       ← break-the-cluster scenarios + SOLUTIONS.md
-├── drills/              ← speed-drills.md + daily drill scripts
-├── scripts/             ← validate-course.sh (YAML + bash static checks)
+├── mock/                ← simulator: run.sh (seed+timer) + grade.sh (auto-grader)
+├── labs/
+│   ├── setup/           ← bootstrap / reset / addons / calico-netpol automation
+│   └── breakfix/        ← break-the-cluster scenarios + SOLUTIONS.md
+├── drills/              ← speed-drills.md + flashcards.md/.csv + daily drill scripts
+├── progress/            ← mastery-tracker.md (per-competency 🔴/🟡/🟢)
+├── scripts/             ← validate-course.sh + add-nav.rb
 ├── notes/               ← weekly study-log skeletons (link to each module)
 │   ├── week-01-architecture.md
 │   ├── week-02-workloads.md

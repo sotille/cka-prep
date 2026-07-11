@@ -1,5 +1,8 @@
 # Week 08 Masterclass — Services & Networking (20% of the exam, feeding the 30% Troubleshooting domain)
 
+> 🧭 **Learning path:** [‹ week-07-storage](../week-07-storage/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-09-troubleshooting ›](../week-09-troubleshooting/masterclass.md)
+
+
 > **Weight correction:** the week-08 notes header says networking is 30% of the exam. That was the pre-Feb-2025 curriculum. Current weights: **Troubleshooting 30%, Cluster Architecture/Installation/Configuration 25%, Services & Networking 20%, Workloads & Scheduling 15%, Storage 10%.** Networking still punches above 20% because a large share of troubleshooting tasks are networking failures (empty endpoints, dead DNS, missing CNI). Confirm live weights on the CNCF curriculum page before exam day.
 
 ## What the exam actually asks
@@ -179,7 +182,7 @@ kube-proxy runs as a DaemonSet (`kube-system/kube-proxy` on kubeadm clusters; ki
 |---|---|---|
 | `iptables` | chains `KUBE-SERVICES` → `KUBE-SVC-*` → `KUBE-SEP-*`, random DNAT | default; rule count scales with services×endpoints |
 | `ipvs` | kernel IPVS virtual servers, hash-based lookup | better at scale, real LB algorithms (`rr`, `lc`...); needs kernel modules |
-| `nftables` | native nftables tables | newer; alpha 1.29, beta 1.31 and still maturing (not GA in the ~1.33 timeframe) — confirm current status; one to *recognize* |
+| `nftables` | native nftables tables | newer; alpha 1.29, beta 1.31, GA in v1.33 — confirm the mode on your exam version; one to *recognize* |
 
 Config lives in the **kube-proxy ConfigMap**, mounted by the DaemonSet:
 

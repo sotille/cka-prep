@@ -1,5 +1,8 @@
 # Week 05 Masterclass — Cluster Maintenance: kubeadm Lifecycle, Upgrades, and etcd (Cluster Architecture, Installation & Configuration — 25%)
 
+> 🧭 **Learning path:** [‹ week-04-lifecycle-observability](../week-04-lifecycle-observability/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-06-security-rbac ›](../week-06-security-rbac/masterclass.md)
+
+
 This module is the single highest-ROI week of the course. The Cluster Architecture domain is 25% of the exam, and its heavy hitters — etcd backup/restore, kubeadm upgrade, node drain — are near-guaranteed tasks worth multiple points each. They are also the tasks where candidates burn the most time, because they involve SSH to nodes, `sudo`, static pod manifests, and long commands that punish improvisation. Everything here is drillable to muscle memory.
 
 ## What the exam actually asks

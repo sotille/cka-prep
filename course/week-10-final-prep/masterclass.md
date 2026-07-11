@@ -1,5 +1,8 @@
 # Week 10 — Final Prep: killer.sh Protocol, Taper, and Exam-Day Execution (meta-module — protects points in all domains: Troubleshooting 30%, Cluster Architecture 25%, Networking 20%, Workloads 15%, Storage 10%)
 
+> 🧭 **Learning path:** [‹ week-09-troubleshooting](../week-09-troubleshooting/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [Mock exams ›](../../mock-exams/)
+
+
 This module is not about Kubernetes. It is about converting eight weeks of Kubernetes into a passing score. The failure mode it targets: candidates who can solve every task in this course untimed and still fail because they burned 25 minutes on task 3, answered task 7 in the wrong context, and panicked after killer.sh scored them 45%. Everything below assumes the timeline in your plan: **today = 2026-07-08 (plan week 5), exam day = 2026-08-17, killer.sh weeks = Aug 3–9 and Aug 10–16**.
 
 Verify the current exam version and domain weights on the CNCF curriculum page before your killer.sh week — weights shift between curriculum revisions.

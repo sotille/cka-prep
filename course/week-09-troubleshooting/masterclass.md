@@ -1,5 +1,8 @@
 # Week 09 Masterclass — Troubleshooting (30% of the exam — the single largest domain, the exam-decider)
 
+> 🧭 **Learning path:** [‹ week-08-networking](../week-08-networking/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-10-final-prep ›](../week-10-final-prep/masterclass.md)
+
+
 Troubleshooting is 30% of the CKA. It is also the domain that silently eats the other four: a "Storage" task that presents as a Pending pod, a "Networking" task that presents as empty endpoints, an "Architecture" task that presents as a dead apiserver. The exam does not label these tasks by domain. You are handed a symptom and a broken cluster, and the clock is running. Winning here is not knowledge, it is **method**: the same four questions and the same first-30-seconds command set applied to every symptom, so you never freeze staring at a Pending pod wondering where to start.
 
 This masterclass is eight playbooks. Each has the same shape: **symptom → first-30-seconds commands → decision path (a text decision tree) → root causes ranked by how often they are the actual cause → fix patterns.** Memorize the shape, not just the content. On exam day you will not have time to think about *how* to troubleshoot; you will only have time to execute.

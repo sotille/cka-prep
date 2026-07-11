@@ -15,7 +15,7 @@ Encoding.default_external = Encoding::UTF_8
 Encoding.default_internal = Encoding::UTF_8
 failed = false
 blocks = 0
-files = Dir.glob(["course/**/*.md", "mock-exams/*.md", "notes/*.md", "drills/*.md", "labs/**/*.md"]).sort
+files = Dir.glob(["course/**/*.md", "mock-exams/*.md", "notes/*.md", "drills/*.md", "labs/**/*.md", "progress/*.md"]).sort
 files.each do |path|
   lines = File.readlines(path)
   in_yaml = false
@@ -60,7 +60,7 @@ while IFS= read -r -d '' f; do
     echo "$err" | sed 's/^/    /'
     fail=1
   fi
-done < <(find labs mock-exams drills scripts -name '*.sh' -print0 2>/dev/null)
+done < <(find labs mock-exams drills scripts mock -name '*.sh' -print0 2>/dev/null)
 echo "  $scripts shell scripts checked"
 
 if [ "$fail" -ne 0 ]; then

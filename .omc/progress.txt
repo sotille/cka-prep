@@ -24,3 +24,24 @@
 - validate-course.sh must force UTF-8 (Encoding.default_external) or ruby heredoc chokes on em-dashes/emoji in course files.
 - Inline ruby -e with pt-BR strings (em dash) breaks under US-ASCII; use ruby scripts/files or ASCII-only inline.
 - Workflow resume-from-cache is essential here: session limits interrupt ~14 agents per run; cached completions replay free.
+
+## Final verification (2026-07-10, after session-limit reset)
+- Completeness audit (general-purpose, read all 10 masterclasses + 3 mocks+solutions + breakfix + drills + coverage map + sampled storage/RBAC exercises): VERDICT = exam-ready. No coverage gaps — every post-Feb-2025 CNCF competency line covered with exam-grade depth (traced all 5 domains). No high-severity technical defects. Flagged 4 minor doc fixes.
+- Architect final sign-off (sampled wk05/06/08/09 masterclasses + wk05 exercises + mock-3 solutions, etcd flow, CSR/RBAC chain, Gateway API + NetworkPolicy semantics, README links, validator): VERDICT = APPROVED, no changes requested. 2 non-blocking observations.
+- Applied all fixes: (1) coverage-map HPA row -> week-02 [done earlier]; (2) coverage-map CRD row -> week-01; (3) speed-drills E6 etcd status -> etcdutl (etcd 3.6 removed status/restore from etcdctl); (4) reconciled lab version note in week-01 (lab runs v1.36); (5) nftables kube-proxy mode corrected to GA in v1.33 (architect obs).
+- Post-fix: validate-course.sh exits 0 (157 YAML blocks + 13 scripts). AI-slop scan: 0 tells across course/mocks/drills/labs. All README links resolve.
+- PRD: all 8 stories passes:true. Course is complete and reviewer-approved.
+
+## Pro-level upgrade (2026-07-10) — 4 packages, all user-requested
+- P1 Lab automation + simulator (TESTED on live kind-cka):
+  - labs/setup/{lib,bootstrap-cluster,reset-cluster,install-addons,calico-netpol-cluster}.sh
+  - mock/{lib-checks,run,grade,grade-1,grade-2,grade-3}.sh — auto-grader on final cluster state, weighted by domain vs 66% (mock-3 pass line 55, killer-calibrated).
+  - Validated grade-1 end-to-end: solved 6/16 tasks → each scored full; unsolved → 0; domain totals 30/25/20/15/10. Fixed 2 grader bugs found in testing: jpeq/jpgrep needed `get` prepended (auth can-i split into cani()); task-1 negative check gated on SA existence. grade-2/grade-3 execute clean, domain math correct. reset-cluster.sh tested (recovered worker2, dropped lab ns).
+- P2 Week 0 + spine + diagnostic:
+  - course/week-00-fundamentals/{masterclass,exercises}.md (entry ramp).
+  - course/LEARNING-PATH.md (5-tier spine) + scripts/add-nav.rb (idempotent prev/next nav injected into all 11 masterclasses).
+  - course/diagnostic.md (15-task placement test, routing table → tiers).
+- P3 Active recall: drills/flashcards.md (160 cards) + drills/flashcards.csv (Anki, parses to 160) + progress/mastery-tracker.md (per-competency 🔴/🟡/🟢).
+- P4 course/cks-bridge/README.md (CKA→CKS roadmap).
+- validate-course.sh extended to progress/ + mock/. Full validation: 192 YAML blocks / 45 files + 24 scripts OK. Zero broken links repo-wide.
+- Learnings: macOS has no `timeout` (use curl --max-time / kubectl --request-timeout); ruby -e chokes on em-dash under US-ASCII (use ruby script files or ASCII-only inline); kind etcd image is distroless (call etcdctl/etcdutl directly, no sh -c); kind cluster is v1.36 → etcd 3.6 (etcdutl required for snapshot status/restore).

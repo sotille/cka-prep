@@ -318,7 +318,7 @@ Every competency line from the current CKA curriculum, mapped to where this cour
 | Cluster Architecture (25%) | Highly-available control plane † | course/week-05-cluster-maintenance | course/week-01-architecture |
 | Cluster Architecture (25%) | Use Helm and Kustomize to install cluster components | course/week-02-workloads-config | course/week-10-final-prep |
 | Cluster Architecture (25%) | Understand extension interfaces (CNI, CSI, CRI) | course/week-01-architecture | course/week-08-networking (CNI), course/week-07-storage (CSI) |
-| Cluster Architecture (25%) | Understand CRDs, install and configure operators | course/week-02-workloads-config | course/week-10-final-prep |
+| Cluster Architecture (25%) | Understand CRDs, install and configure operators | course/week-01-architecture | course/week-02-workloads-config |
 | Workloads & Scheduling (15%) | Application deployments, rolling updates and rollbacks | course/week-02-workloads-config | drills/speed-drills.md |
 | Workloads & Scheduling (15%) | Use ConfigMaps and Secrets to configure applications | course/week-02-workloads-config | drills/speed-drills.md |
 | Workloads & Scheduling (15%) | Configure workload autoscaling (HPA) | course/week-02-workloads-config | mock-exams |

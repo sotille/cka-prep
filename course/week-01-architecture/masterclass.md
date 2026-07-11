@@ -1,8 +1,11 @@
 # Week 1 Masterclass — Cluster Architecture & Core Concepts (feeds Cluster Architecture, Installation & Configuration 25%, Troubleshooting 30%, Workloads & Scheduling 15%)
 
+> 🧭 **Learning path:** [‹ week-00-fundamentals](../week-00-fundamentals/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-02-workloads-config ›](../week-02-workloads-config/masterclass.md)
+
+
 Week 1 is the load-bearing wall of the whole exam. Every troubleshooting task — the largest single domain at 30% — is really the question "which stage of the `kubectl apply → running pod` pipeline broke, and where do I look?" Every other task rides on kubectl fluency and kubeconfig discipline that you either have in your fingers or you burn minutes you don't have. Master the pipeline, the components, and the API-machinery introspection tools, and the rest of the course is applications of this one model.
 
-Version note: written against v1.31–v1.34 behavior, kept version-agnostic where possible. Native sidecars (`initContainers` with `restartPolicy: Always`) were enabled by default (beta) in v1.29 and graduated to GA/stable in v1.33 — behavior is unchanged across the exam's 1.31–1.34 range since the feature is on by default from 1.29; server-side strict validation became the default in v1.27. Check the current exam Kubernetes version on the CNCF curriculum page (github.com/cncf/curriculum) before exam day and re-confirm any version-flagged behavior below.
+Version note: behaviors here are flagged for the exam's supported range (v1.31–v1.34 at time of writing) and kept version-agnostic where possible; the local kind lab itself runs v1.36 (see week-07), newer than the exam and fine for practice. Native sidecars (`initContainers` with `restartPolicy: Always`) were enabled by default (beta) in v1.29 and graduated to GA/stable in v1.33 — behavior is unchanged across the exam's 1.31–1.34 range since the feature is on by default from 1.29; server-side strict validation became the default in v1.27. Check the current exam Kubernetes version on the CNCF curriculum page (github.com/cncf/curriculum) before exam day and re-confirm any version-flagged behavior below.
 
 ---
 

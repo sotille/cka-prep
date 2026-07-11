@@ -1,5 +1,8 @@
 # Week 02 Masterclass — Workloads & Configuration (Workloads & Scheduling 15% · Helm/Kustomize under Cluster Architecture 25% · feeds Troubleshooting 30%)
 
+> 🧭 **Learning path:** [‹ week-01-architecture](../week-01-architecture/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-03-scheduling ›](../week-03-scheduling/masterclass.md)
+
+
 Workload controllers and configuration plumbing are the exam's bread-and-butter build tasks — and, disguised as "why is this pod broken", a large slice of the 30% troubleshooting domain. This module covers the controller internals (Deployments, DaemonSets, StatefulSets, Jobs, CronJobs), the entire ConfigMap/Secret consumption matrix, resources/QoS/eviction, quotas, HPA v2, and the two Feb-2025 curriculum additions most older courses skip: Helm and Kustomize. Where behavior is version-dependent it is flagged; verify the current exam Kubernetes version on the CNCF curriculum page before exam day.
 
 ---

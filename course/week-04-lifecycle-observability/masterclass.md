@@ -1,5 +1,8 @@
 # Week 04 Masterclass — Pod Lifecycle & Observability (feeds Troubleshooting 30% + Workloads & Scheduling 15%)
 
+> 🧭 **Learning path:** [‹ week-03-scheduling](../week-03-scheduling/masterclass.md) · [Tier map](../LEARNING-PATH.md) · [week-05-cluster-maintenance ›](../week-05-cluster-maintenance/masterclass.md)
+
+
 This module is the mechanical core of the exam's largest domain. Troubleshooting tasks are rarely exotic — they are a pod in `CrashLoopBackOff`, a deployment wedged mid-rollout, a liveness probe murdering a healthy app, or "find the pod using the most CPU and write its name to a file." Each one decomposes into the same three moves: read the state machine (status + events), read the evidence (logs + exit codes), extract the answer in the exact format asked. The kubelet-side internals below — probe execution, termination signalling, node log paths, `crictl`, `journalctl` — are what separate a 4-minute fix from a 20-minute flail. Everything here is drillable on the kind lab.
 
 Version note: behaviour described is stable across recent Kubernetes releases; version-dependent details are flagged inline. Confirm the current exam version on the CNCF curriculum page (github.com/cncf/curriculum) before exam day.

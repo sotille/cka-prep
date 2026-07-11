@@ -70,7 +70,7 @@
     {
       "id": "US-007",
       "title": "Technical verification pass over all generated content",
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "scripts/validate-course.sh exists and syntax-validates every fenced yaml block in course/, mock-exams/, and notes/, and bash -n checks all lab scripts; running it exits 0",
         "Adversarial technical review of every module completed (facts, apiVersions, flags, commands) with all confirmed defects fixed",
@@ -80,7 +80,7 @@
     {
       "id": "US-008",
       "title": "Repo integration and final review",
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "README.md updated with a course index table linking every module, mock exam, and lab, without breaking existing sections",
         "Each notes/week-NN file gains a link to its corresponding deep module (notes stay as personal-log skeletons)",

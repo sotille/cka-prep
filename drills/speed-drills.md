@@ -156,13 +156,13 @@ k -n kube-system exec etcd-cka-control-plane -- etcdctl \
   --cert=/etc/kubernetes/pki/etcd/server.crt \
   --key=/etc/kubernetes/pki/etcd/server.key \
   snapshot save /var/lib/etcd/drill-snap.db
-k -n kube-system exec etcd-cka-control-plane -- etcdctl \
+k -n kube-system exec etcd-cka-control-plane -- etcdutl \
   snapshot status /var/lib/etcd/drill-snap.db -w table
 ```
 
 Calling the `etcdctl` binary directly (no `sh -c`) runs even on distroless etcd images that ship no shell; `ETCDCTL_API=3` is dropped because API v3 is the default on etcd ≥3.4. If `kubectl exec` is blocked, reach etcdctl through the node runtime: `docker exec cka-control-plane crictl exec $(docker exec cka-control-plane crictl ps --name etcd -q) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key snapshot save /var/lib/etcd/drill-snap.db`.
 
-Exam-flavor note: on the real exam you `ssh` to the control-plane node, `sudo -i`, and run `etcdctl` on the host with the cert paths given in the task — the flags are identical, only the entry point differs. (`etcdctl snapshot status` is deprecated in favor of `etcdutl` in newer etcd releases; both syntaxes work on current exam versions.)
+Exam-flavor note: on the real exam you `ssh` to the control-plane node, `sudo -i`, and run `etcdctl`/`etcdutl` on the host with the cert paths given in the task — the flags are identical, only the entry point differs. Use `etcdctl` for `snapshot save` (talks to the live server) and `etcdutl` for `snapshot status`/`snapshot restore` (offline, operates on the file): etcd 3.6 removed `status` and `restore` from `etcdctl`, and the lab (v1.36 → etcd 3.6) reflects that. On older exam versions `etcdctl snapshot status` still works, but `etcdutl` is correct everywhere.
 
 E7 on kind — write the manifest inside the node container:
 
